@@ -1,0 +1,71 @@
+# ---------- Personal photos: NEVER commit ----------
+test-photos/
+captures/
+exports/
+backups/
+*.jpg
+*.jpeg
+*.heic
+*.dng
+*.png
+*.webp
+# Allow app resources (icons, drawables) inside the Android project
+!android/app/src/main/res/**/*.png
+!android/app/src/main/res/**/*.webp
+!android/app/src/main/res/**/*.jpg
+
+# ---------- Android / Gradle ----------
+android/.gradle/
+android/build/
+android/app/build/
+android/**/build/
+android/captures/
+android/.externalNativeBuild/
+android/.cxx/
+local.properties
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+output-metadata.json
+
+# Signing keys and secrets
+*.jks
+*.keystore
+keystore.properties
+google-services.json
+.env
+.env.*
+
+# ---------- Android Studio / IntelliJ ----------
+.idea/
+*.iml
+*.ipr
+*.iws
+.navigation/
+.kotlin/
+
+# ---------- Python prototype ----------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+prototype/output/
+prototype/models/*.task
+prototype/models/*.tflite
+
+# Clear notebook outputs before committing (they can embed photos).
+# Tip: pip install nbstripout && nbstripout --install
+
+# ---------- OS / editor ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+*.swp
+*~
+
+# ---------- Logs ----------
+*.log
