@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Window theme only; UI colors come from Compose (ui/theme/Theme.kt). -->
+    <style name="Theme.Wardrobe" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>
