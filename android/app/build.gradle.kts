@@ -76,6 +76,11 @@ dependencies {
     // On-device ML. Models are bundled in assets/models (see scripts/fetch-models.sh).
     implementation(libs.mediapipe.tasks.vision)
 
+    implementation(libs.camerax.core)
+    implementation(libs.camerax.camera2)
+    implementation(libs.camerax.lifecycle)
+    implementation(libs.camerax.view)
+
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

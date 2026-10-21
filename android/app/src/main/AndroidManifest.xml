@@ -2,8 +2,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Privacy: no INTERNET permission. Camera permission is added in Phase 1;
-         INTERNET (LAN-only phone remote) is added in Phase 5. -->
+    <!-- Privacy: no INTERNET permission. INTERNET (LAN-only phone remote) is added in Phase 5. -->
+
+    <!-- Rear camera for capture sessions. Photos go to app-private storage only. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="true" />
 
     <!-- MediaPipe pulls in Google's datatransport library (usage statistics), which adds these.
          Removing them means Android blocks all network access for the app. Keep these lines. -->
