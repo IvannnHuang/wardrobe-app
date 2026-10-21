@@ -27,6 +27,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.Switch
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SnackbarHost
@@ -51,7 +54,15 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import android.media.AudioManager
+import android.media.ToneGenerator
+import android.os.SystemClock
 import dev.wardrobe.app.capture.LivePoseAnalyzer
+import dev.wardrobe.app.domain.capture.AutoShutter
+import dev.wardrobe.app.domain.capture.PoseCheckResult
+import dev.wardrobe.app.domain.capture.PoseChecker
+import dev.wardrobe.app.domain.capture.spoken
+import dev.wardrobe.app.domain.model.View
 import dev.wardrobe.app.domain.model.PoseFrame
 import java.util.concurrent.Executors
 
@@ -108,6 +119,15 @@ private fun CameraControls(viewModel: CameraViewModel = hiltViewModel()) {
         }
     }
 
+    // Pose checks + auto-capture
+    val checker = remember { PoseChecker() }
+    val autoShutter = remember { AutoShutter() }
+    var wanted by remember { mutableStateOf(View.FRONT) }
+    var autoMode by remember { mutableStateOf(false) }
+    var check by remember { mutableStateOf<PoseCheckResult?>(null) }
+    val beeper = remember { ToneGenerator(AudioManager.STREAM_MUSIC, 90) }
+    DisposableEffect(Unit) { onDispose { beeper.release() } }
+
     LaunchedEffect(state.error) {
         state.error?.let {
             snackbar.showSnackbar(it)
@@ -132,10 +152,35 @@ private fun CameraControls(viewModel: CameraViewModel = hiltViewModel()) {
         )
     }
 
+    LaunchedEffect(pose) {
+        val frame = pose ?: return@LaunchedEffect
+        val result = checker.check(frame, wanted, SystemClock.uptimeMillis())
+        check = result
+        if (autoMode && !state.capturing && autoShutter.update(result.ready, SystemClock.uptimeMillis())) {
+            beeper.startTone(ToneGenerator.TONE_PROP_BEEP, 150)
+            takePhoto()
+            // Next angle: front -> right -> back -> left, then stop.
+            val next = View.entries.getOrNull(wanted.ordinal + 1)
+            if (next != null) wanted = next else autoMode = false
+        }
+    }
+
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         CameraPreview(imageCapture, imageAnalysis, Modifier.fillMaxSize())
-        PoseOverlay(pose, Modifier.fillMaxSize())
-        PoseReadout(pose, Modifier.align(Alignment.TopStart).padding(16.dp))
+        PoseOverlay(
+            pose, Modifier.fillMaxSize(),
+            color = if (check?.ready == true) Color(0xFF4CFF7A) else Color(0xFFFFB74D),
+        )
+        PoseReadout(pose, check, Modifier.align(Alignment.TopStart).padding(16.dp))
+        HintBanner(wanted, check, autoMode, Modifier.align(Alignment.TopCenter).padding(top = 16.dp))
+
+        CaptureSettings(
+            wanted = wanted,
+            onWanted = { wanted = it },
+            autoMode = autoMode,
+            onAutoMode = { autoMode = it },
+            modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+        )
 
         state.lastShot?.let { shot ->
             LastShotCard(shot, state.shotsSaved, Modifier.align(Alignment.BottomStart).padding(16.dp))
@@ -152,11 +197,60 @@ private fun CameraControls(viewModel: CameraViewModel = hiltViewModel()) {
 }
 
 @Composable
-private fun PoseReadout(pose: PoseFrame?, modifier: Modifier = Modifier) {
+private fun HintBanner(wanted: View, check: PoseCheckResult?, autoMode: Boolean, modifier: Modifier = Modifier) {
+    val ready = check?.ready == true
+    val text = when {
+        check == null -> "Starting…"
+        ready -> "${wanted.spoken().replaceFirstChar { it.uppercase() }} ✓ Ready" + if (autoMode) " · capturing" else ""
+        else -> check.issues.first().message
+    }
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(24.dp),
+        color = if (ready) Color(0xFF1B5E20).copy(alpha = 0.85f) else Color.Black.copy(alpha = 0.7f),
+    ) {
+        Text(text, Modifier.padding(horizontal = 24.dp, vertical = 12.dp), color = Color.White,
+            style = MaterialTheme.typography.headlineSmall)
+    }
+}
+
+@Composable
+private fun CaptureSettings(
+    wanted: View,
+    onWanted: (View) -> Unit,
+    autoMode: Boolean,
+    onAutoMode: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(modifier = modifier, shape = RoundedCornerShape(12.dp), color = Color.Black.copy(alpha = 0.6f)) {
+        Column(Modifier.padding(12.dp), horizontalAlignment = Alignment.End) {
+            Row {
+                View.entries.forEach { view ->
+                    FilterChip(
+                        selected = view == wanted,
+                        onClick = { onWanted(view) },
+                        label = { Text(view.spoken().substringBefore(" ").replaceFirstChar { it.uppercase() }) },
+                        modifier = Modifier.padding(start = 6.dp),
+                        colors = FilterChipDefaults.filterChipColors(labelColor = Color.White),
+                    )
+                }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Auto capture", color = Color.White, style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.width(8.dp))
+                Switch(checked = autoMode, onCheckedChange = onAutoMode)
+            }
+        }
+    }
+}
+
+@Composable
+private fun PoseReadout(pose: PoseFrame?, check: PoseCheckResult?, modifier: Modifier = Modifier) {
     val text = when {
         pose == null -> "Pose: starting…"
         pose.landmarks.isEmpty() -> "Pose: nobody in view · ${pose.inferenceMs} ms"
-        else -> "Pose: found · ${pose.inferenceMs} ms · ${pose.imageWidth}×${pose.imageHeight}"
+        else -> "Pose: ${pose.inferenceMs} ms · seen ${check?.seenView?.spoken() ?: "?"} · " +
+            "shoulders/torso %.2f".format(check?.shoulderRatio ?: 0f)
     }
     Surface(modifier = modifier, shape = RoundedCornerShape(8.dp), color = Color.Black.copy(alpha = 0.6f)) {
         Text(text, Modifier.padding(horizontal = 10.dp, vertical = 6.dp), color = Color.White,
