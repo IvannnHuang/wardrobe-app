@@ -15,7 +15,7 @@ import org.junit.runner.RunWith
 /**
  * Smoke test for the bundled pose model, run on the tablet.
  *
- * The second test needs a photo of me at app/src/androidTest/assets/pose_test.jpg. It is git-ignored
+ * The second test needs a photo of me at app/src/androidTest/assets/pose_test.jpg (or .png). It is git-ignored
  * (never commit photos), so the test is skipped when the file is missing.
  */
 @RunWith(AndroidJUnit4::class)
@@ -33,9 +33,9 @@ class PoseDetectorTest {
 
     @Test
     fun findsMyPoseOnTestPhoto() {
-        val hasPhoto = testAssets.list("")?.contains(TEST_PHOTO) == true
-        assumeTrue("Put a full-body photo at androidTest/assets/$TEST_PHOTO to run this", hasPhoto)
-        val photo = testAssets.open(TEST_PHOTO).use { BitmapFactory.decodeStream(it) }
+        val photoName = TEST_PHOTOS.firstOrNull { testAssets.list("")?.contains(it) == true }
+        assumeTrue("Put a full-body photo at androidTest/assets/pose_test.jpg (or .png) to run this", photoName != null)
+        val photo = testAssets.open(photoName!!).use { BitmapFactory.decodeStream(it) }
 
         PoseDetector(appContext).use { detector ->
             detector.detect(photo) // warm-up
@@ -54,7 +54,7 @@ class PoseDetectorTest {
     }
 
     private companion object {
-        const val TEST_PHOTO = "pose_test.jpg"
+        val TEST_PHOTOS = listOf("pose_test.jpg", "pose_test.png")
         const val TAG = "PoseDetectorTest"
     }
 }
