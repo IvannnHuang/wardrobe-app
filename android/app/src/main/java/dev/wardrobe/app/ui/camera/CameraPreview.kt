@@ -1,6 +1,7 @@
 package dev.wardrobe.app.ui.camera
 
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.Preview
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
@@ -29,19 +30,20 @@ fun buildImageCapture(): ImageCapture = ImageCapture.Builder()
     .build()
 
 /**
- * Live preview from the rear main camera, bound together with [imageCapture]. The whole camera frame
+ * Live preview from the rear main camera, bound together with [imageCapture] (photos) and
+ * [imageAnalysis] (small frames for the live pose check). The whole camera frame
  * is shown (letterboxed, same 4:3 framing as the photos), so it's easy to see whether I'm fully in
  * shot. The camera is released when the page closes or the app goes to the background.
  */
 @Composable
-fun CameraPreview(imageCapture: ImageCapture, modifier: Modifier = Modifier) {
+fun CameraPreview(imageCapture: ImageCapture, imageAnalysis: ImageAnalysis, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val previewView = remember {
         PreviewView(context).apply { scaleType = PreviewView.ScaleType.FIT_CENTER }
     }
 
-    DisposableEffect(lifecycleOwner, imageCapture) {
+    DisposableEffect(lifecycleOwner, imageCapture, imageAnalysis) {
         val providerFuture = ProcessCameraProvider.getInstance(context)
         var provider: ProcessCameraProvider? = null
         providerFuture.addListener({
@@ -55,7 +57,7 @@ fun CameraPreview(imageCapture: ImageCapture, modifier: Modifier = Modifier) {
                 .build()
                 .apply { setSurfaceProvider(previewView.surfaceProvider) }
             cameraProvider.unbindAll()
-            cameraProvider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageCapture)
+            cameraProvider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageCapture, imageAnalysis)
         }, ContextCompat.getMainExecutor(context))
         onDispose { provider?.unbindAll() }
     }

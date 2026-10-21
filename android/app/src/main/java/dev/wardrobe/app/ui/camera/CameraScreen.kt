@@ -38,6 +38,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import java.io.ByteArrayOutputStream
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -50,6 +51,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import dev.wardrobe.app.capture.LivePoseAnalyzer
+import dev.wardrobe.app.domain.model.PoseFrame
+import java.util.concurrent.Executors
 
 @Composable
 fun CameraScreen() {
@@ -88,7 +92,21 @@ private fun CameraControls(viewModel: CameraViewModel = hiltViewModel()) {
     val context = LocalContext.current
     val state by viewModel.state.collectAsStateWithLifecycle()
     val imageCapture = remember { buildImageCapture() }
+    val imageAnalysis = remember { LivePoseAnalyzer.buildImageAnalysis() }
     val snackbar = remember { SnackbarHostState() }
+
+    // Live pose: the model runs on its own thread; the latest result is drawn over the preview.
+    var pose by remember { mutableStateOf<PoseFrame?>(null) }
+    DisposableEffect(imageAnalysis) {
+        val executor = Executors.newSingleThreadExecutor()
+        val analyzer = LivePoseAnalyzer(context) { pose = it }
+        imageAnalysis.setAnalyzer(executor, analyzer)
+        onDispose {
+            imageAnalysis.clearAnalyzer()
+            executor.execute { analyzer.close() } // after any frame still being analysed
+            executor.shutdown()
+        }
+    }
 
     LaunchedEffect(state.error) {
         state.error?.let {
@@ -115,7 +133,9 @@ private fun CameraControls(viewModel: CameraViewModel = hiltViewModel()) {
     }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
-        CameraPreview(imageCapture, Modifier.fillMaxSize())
+        CameraPreview(imageCapture, imageAnalysis, Modifier.fillMaxSize())
+        PoseOverlay(pose, Modifier.fillMaxSize())
+        PoseReadout(pose, Modifier.align(Alignment.TopStart).padding(16.dp))
 
         state.lastShot?.let { shot ->
             LastShotCard(shot, state.shotsSaved, Modifier.align(Alignment.BottomStart).padding(16.dp))
@@ -128,6 +148,19 @@ private fun CameraControls(viewModel: CameraViewModel = hiltViewModel()) {
         )
 
         SnackbarHost(snackbar, Modifier.align(Alignment.TopCenter))
+    }
+}
+
+@Composable
+private fun PoseReadout(pose: PoseFrame?, modifier: Modifier = Modifier) {
+    val text = when {
+        pose == null -> "Pose: starting…"
+        pose.landmarks.isEmpty() -> "Pose: nobody in view · ${pose.inferenceMs} ms"
+        else -> "Pose: found · ${pose.inferenceMs} ms · ${pose.imageWidth}×${pose.imageHeight}"
+    }
+    Surface(modifier = modifier, shape = RoundedCornerShape(8.dp), color = Color.Black.copy(alpha = 0.6f)) {
+        Text(text, Modifier.padding(horizontal = 10.dp, vertical = 6.dp), color = Color.White,
+            style = MaterialTheme.typography.bodySmall)
     }
 }
 
