@@ -24,6 +24,7 @@ from pathlib import Path
 import cv2
 import mediapipe as mp
 import numpy as np
+from scipy import ndimage
 from mediapipe.tasks.python import BaseOptions, vision
 from PIL import Image, ImageOps
 
@@ -40,17 +41,18 @@ BACKGROUND, HAIR, BODY_SKIN, FACE_SKIN, CLOTHES, OTHER = range(6)
 
 # MediaPipe pose landmark ids used for alignment: shoulders, hips, knees, ankles.
 ALIGN_POINTS = (11, 12, 23, 24, 25, 26, 27, 28)
+# Wrist, pinky, index, thumb for each hand.
+HANDS = ((15, 17, 19, 21), (16, 18, 20, 22))
 
 
 @dataclass
 class Settings:
-    mirror: bool = False            # flip photos taken in a mirror
+    mirror: bool = False            # flip photos taken in a mirror; also masks the phone-holding hand
     work_long_side: int = 1600      # process at this size (px) for speed
     min_visibility: float = 0.6     # landmarks below this are not used for alignment
     change_threshold: float = 14.0  # colour difference (Delta E, LAB) that counts as "changed"
     person_threshold: float = 0.5
-    sliver_px: int = 12             # band outside the body silhouette where base-colour slivers are dropped
-    base_color_threshold: float = 12.0
+    edge_band_px: int = 16          # beyond this distance from visible base outfit, person pixels count as garment
     min_component_frac: float = 0.02  # drop blobs smaller than this fraction of the largest blob
     feather_px: float = 1.5
 
@@ -182,17 +184,28 @@ def match_lighting(lab_g: np.ndarray, lab_b: np.ndarray, background: np.ndarray,
     return lab_g + shift
 
 
-def base_palette(body: Analysis, lab_b: np.ndarray, s: Settings, k: int = 3) -> np.ndarray:
-    """Main colours of the base outfit, from clothes pixels in the body figure."""
-    clothes = (body.classes == CLOTHES) & (body.person > s.person_threshold)
-    pixels = lab_b[clothes]
-    if len(pixels) < k:
-        return np.zeros((0, 3), np.float32)
-    pixels = pixels[np.random.default_rng(0).choice(len(pixels), min(len(pixels), 20000), replace=False)]
-    _, _, centers = cv2.kmeans(pixels.astype(np.float32), k, None,
-                               (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.5), 3,
-                               cv2.KMEANS_PP_CENTERS)
-    return centers
+def reference_colours(body: Analysis, lab_b: np.ndarray, reliable: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """For every pixel: the colour of the nearest body-figure pixel where the base outfit is clearly visible,
+    and the distance to it. Next to the torso that is the base top, next to the legs the base bottom; where
+    the body figure has a hand or phone in the way, the surrounding base outfit is used instead."""
+    if not reliable.any():
+        h, w = reliable.shape
+        return lab_b, np.full((h, w), np.inf, np.float32)
+    dist, (iy, ix) = ndimage.distance_transform_edt(~reliable, return_indices=True)
+    return lab_b[iy, ix], dist
+
+
+def phone_hand_region(a: Analysis) -> np.ndarray:
+    """Mirror selfies: box around the raised (phone-holding) hand, extended upward over the phone."""
+    h, w = a.rgb.shape[:2]
+    hand = min(HANDS, key=lambda ids: a.landmarks[ids[0], 1])  # higher wrist = phone hand
+    pts = a.landmarks[list(hand), :2]
+    size = max(20.0, float(np.max(np.linalg.norm(pts - pts[0], axis=1))))
+    x0, y0 = pts.min(axis=0) - (size * 0.8, size * 3.0)
+    x1, y1 = pts.max(axis=0) + (size * 0.8, size * 0.6)
+    region = np.zeros((h, w), bool)
+    region[max(0, int(y0)):min(h, int(y1)), max(0, int(x0)):min(w, int(x1))] = True
+    return region
 
 
 def cleanup(mask: np.ndarray, s: Settings) -> np.ndarray:
@@ -208,34 +221,40 @@ def cleanup(mask: np.ndarray, s: Settings) -> np.ndarray:
 
 
 def cut_out(garment: Analysis, valid: np.ndarray, body: Analysis, s: Settings, report: Report):
-    """Returns (RGBA cut-out, reason map). Reason codes are listed in REASONS."""
+    """Returns (RGBA cut-out, reason map, colour change). Reason codes are listed in REASONS."""
     person_g = (garment.person > s.person_threshold) & valid
     person_b = body.person > s.person_threshold
+    blocked_g = phone_hand_region(garment) if s.mirror else np.zeros_like(person_g)
+    blocked_b = phone_hand_region(body) if s.mirror else np.zeros_like(person_b)
 
     lab_b = to_lab(body.rgb)
     lab_g = match_lighting(to_lab(garment.rgb), lab_b, ~person_g & ~person_b & valid, report)
-    change = np.linalg.norm(lab_g - lab_b, axis=2)
-    changed = change > s.change_threshold
+
+    # Compare each garment pixel with the base outfit at (or nearest to) the same place on the body figure.
+    # Any body-figure pixel except hair/face is a valid "before" (base outfit or bare arm). Don't rely on the
+    # segmenter's clothes/skin labels here: it mislabels dark clothes as skin. Hair is excluded so a dark
+    # hood beside the head isn't mistaken for hair.
+    reliable_b = person_b & ~np.isin(body.classes, (HAIR, FACE_SKIN)) & ~blocked_b
+    reference, dist = reference_colours(body, lab_b, reliable_b)
+    change = np.linalg.norm(lab_g - reference, axis=2)
+    # Far from any visible base outfit (e.g. a hood beside the head, a wide sleeve) = garment sticking out.
+    changed = (change > s.change_threshold) | (dist > s.edge_band_px)
 
     skin_hair = np.isin(garment.classes, (HAIR, BODY_SKIN, FACE_SKIN))
 
-    # Slivers of base outfit just outside the body silhouette come from imperfect alignment.
-    palette = base_palette(body, lab_b, s)
-    near_body = cv2.dilate(person_b.astype(np.uint8), np.ones((2 * s.sliver_px + 1,) * 2, np.uint8)).astype(bool)
-    if len(palette):
-        base_dist = np.min(np.linalg.norm(lab_g[..., None, :] - palette[None, None], axis=3), axis=2)
-        base_sliver = near_body & ~person_b & (base_dist < s.base_color_threshold)
-    else:
-        base_sliver = np.zeros_like(person_b)
-
-    raw = person_g & ~skin_hair & changed & ~base_sliver
+    raw = person_g & ~skin_hair & changed
+    if blocked_g.any():
+        # Inside the phone/hand box keep only pixels that look like the rest of the garment.
+        garment_colour = np.median(lab_g[raw & ~blocked_g], axis=0)
+        blocked_g &= np.linalg.norm(lab_g - garment_colour, axis=2) > s.change_threshold * 1.5
+    raw &= ~blocked_g
     keep = cleanup(raw, s)
 
     reason = np.zeros(person_b.shape, np.uint8)            # 0 background
     reason[person_g] = 4                                   # removed by cleanup (default inside person)
-    reason[person_g & ~changed] = 2                        # same as body figure -> base outfit/body
-    reason[person_g & base_sliver] = 3                     # base-colour sliver at silhouette edge
+    reason[person_g & ~changed] = 2                        # same as base outfit on body figure
     reason[person_g & skin_hair] = 1                       # skin / hair
+    reason[person_g & blocked_g] = 3                       # hand + phone (mirror mode)
     reason[keep] = 5                                       # kept as garment
 
     report.garment_area_frac = round(float(keep.mean()), 4)
@@ -253,7 +272,7 @@ REASONS = {
     0: ("background", (0, 0, 0)),
     1: ("skin_hair", (0, 140, 255)),       # orange
     2: ("same_as_body", (255, 120, 0)),    # blue
-    3: ("base_sliver", (200, 0, 200)),     # purple
+    3: ("hand_phone", (200, 0, 200)),      # purple
     4: ("cleanup", (0, 0, 255)),           # red
     5: ("kept", (0, 200, 0)),              # green
 }
