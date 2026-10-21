@@ -14,6 +14,7 @@ import java.nio.file.StandardCopyOption
  * Layout:
  *   body/<figureId>/<view>.jpg                  body figure photos
  *   captures/<sessionId>/<entryId>/<view>.jpg   raw captures (+ closeup.jpg)
+ *   captures/manual/<takenAt>.jpg               manual shutter shots
  *   cutouts/<entryId>/<view>.png                batch-processing output awaiting review
  *   items/<itemId>/<versionId>/<view>.png       approved wardrobe images
  */
@@ -24,6 +25,8 @@ class PhotoStore(private val root: File) {
     fun closeUpPath(sessionId: String, entryId: Long) = "captures/$sessionId/$entryId/closeup.jpg"
     fun cutoutPath(entryId: Long, view: View) = "cutouts/$entryId/${view.key}.png"
     fun itemPath(itemId: Long, versionId: Long, view: View) = "items/$itemId/$versionId/${view.key}.png"
+    /** Manual shutter shots outside a session (Phase 1 testing). */
+    fun manualShotPath(takenAt: Long) = "captures/manual/$takenAt.jpg"
 
     /** Absolute file for a stored relative path. Rejects paths that would escape [root]. */
     fun file(relativePath: String): File {
