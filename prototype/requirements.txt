@@ -6,3 +6,7 @@ scikit-image>=0.24     # texture analysis
 matplotlib>=3.9
 jupyter>=1.0
 nbstripout>=0.7        # strips notebook outputs before commits
+
+# experiment.py only (clothes segmentation models; install torch CPU from https://download.pytorch.org/whl/cpu)
+torch>=2.5
+transformers>=4.45
