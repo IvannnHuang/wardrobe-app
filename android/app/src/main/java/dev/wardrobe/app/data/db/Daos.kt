@@ -94,6 +94,9 @@ interface CaptureEntryDao {
     @Query("SELECT * FROM capture_entry WHERE status = :status ORDER BY createdAt")
     fun observeByStatus(status: CaptureStatus): Flow<List<CaptureEntryEntity>>
 
+    @Query("SELECT id FROM capture_entry WHERE status IN (:statuses) ORDER BY createdAt")
+    suspend fun idsWithStatus(statuses: List<CaptureStatus>): List<Long>
+
     /** Garments waiting in the review tray (captured but not yet approved or rejected). */
     @Query("SELECT COUNT(*) FROM capture_entry WHERE status IN ('CAPTURED', 'PROCESSING', 'READY_FOR_REVIEW')")
     fun observeTrayCount(): Flow<Int>

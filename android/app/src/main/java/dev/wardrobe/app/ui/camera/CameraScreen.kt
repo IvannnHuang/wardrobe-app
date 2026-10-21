@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.media.AudioManager
 import android.media.ToneGenerator
 import android.net.Uri
+import android.os.Build
 import android.os.SystemClock
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -136,6 +137,13 @@ private fun CameraControls(viewModel: CameraViewModel = hiltViewModel()) {
     var autoMode by remember { mutableStateOf(true) }
     var check by remember { mutableStateOf<PoseCheckResult?>(null) }
     var confirmFinish by remember { mutableStateOf(false) }
+    // Asked once when the first session starts, for the "N items ready to review" notification.
+    val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
+    fun askForNotifications() {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
     // Exposure + white balance are locked from the first shot of a capture until it ends.
     var camera by remember { mutableStateOf<Camera?>(null) }
     var locked by remember { mutableStateOf(false) }
@@ -227,7 +235,7 @@ private fun CameraControls(viewModel: CameraViewModel = hiltViewModel()) {
             StartPanel(
                 hasBodyFigure = state.hasBodyFigure,
                 onBodyFigure = { autoMode = true; viewModel.startBodyFigure() },
-                onStartSession = { autoMode = true; viewModel.startSession() },
+                onStartSession = { autoMode = true; askForNotifications(); viewModel.startSession() },
                 modifier = Modifier.align(Alignment.Center),
             )
         } else {

@@ -25,6 +25,7 @@ import dev.wardrobe.app.domain.capture.landmarksJson
 import dev.wardrobe.app.domain.capture.pathsJson
 import dev.wardrobe.app.domain.model.Landmark
 import dev.wardrobe.app.domain.model.View
+import dev.wardrobe.app.pipeline.ProcessingScheduler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -48,6 +49,7 @@ class CameraViewModel @Inject constructor(
     private val photoStore: PhotoStore,
     private val bodyFigureDao: BodyFigureDao,
     private val captureEntryDao: CaptureEntryDao,
+    private val processingScheduler: ProcessingScheduler,
 ) : ViewModel() {
 
     /** [view] is null for a close-up. */
@@ -128,13 +130,17 @@ class CameraViewModel @Inject constructor(
             if (session.mode == CaptureMode.BODY_FIGURE) {
                 withContext(Dispatchers.IO) { photoStore.deleteDir("body/${session.key}") }
             }
+            if (session.mode == CaptureMode.GARMENT) {
+                // Batch processing starts after the session, so it doesn't compete with the live camera.
+                withContext(Dispatchers.IO) { processingScheduler.enqueuePending() }
+            }
             val done = session.garmentsDone
             _state.update {
                 it.copy(
                     session = null, currentEntryId = null, closeUpMode = false, lastShot = null,
                     message = when (session.mode) {
                         CaptureMode.BODY_FIGURE -> "Body figure setup cancelled"
-                        CaptureMode.GARMENT -> "Session finished: $done garment${if (done == 1) "" else "s"} in the review tray" +
+                        CaptureMode.GARMENT -> "Session finished: processing $done garment${if (done == 1) "" else "s"}" +
                             if (discarded) " (unfinished garment discarded)" else ""
                     },
                 )
