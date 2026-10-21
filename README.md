@@ -29,6 +29,12 @@ Full project plan and rules: [CLAUDE.md](CLAUDE.md)
    nbstripout --install   # strips notebook outputs (which can embed photos) before commits
    ```
 3. Install **Claude Code** and run it from the repo root.
+4. Download the bundled ML models (git-ignored, checksum-pinned), then build:
+   ```bash
+   bash scripts/fetch-models.sh
+   cd android && ./gradlew installDebug
+   ```
+   Gradle needs JDK 17–23 (Android Studio's `~/.jdks/jbr-21` works); the bundled JDK 25 is too new for Gradle 8.11.
 
 ### Test photos
 Create `test-photos/` locally (it's ignored by git):

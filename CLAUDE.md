@@ -17,6 +17,8 @@ Single user (me), single device. Draft 1 = everything below. Draft 2 = auto-pair
 - **Everything runs locally on the tablet.** No cloud APIs, no analytics, no remote model downloads.
   - Bundle all models in the APK (MediaPipe Tasks / TensorFlow Lite). **Do not use Google ML Kit models that download through Play Services.**
   - Do not add the `INTERNET` permission for anything except the local phone-remote server (LAN only).
+  - MediaPipe pulls in Google `datatransport` (usage stats), which adds `INTERNET` + `ACCESS_NETWORK_STATE`. The app manifest removes both with `tools:node="remove"`. After adding any dependency, check the merged manifest for new permissions. When Phase 5 adds `INTERNET` for the LAN remote, exclude or disable `datatransport` first.
+  - Models are fetched once by `scripts/fetch-models.sh` (pinned sha256) into `android/app/src/main/assets/models/` and `prototype/models/`; they are git-ignored.
 - **Photos are stored in app-private storage** (`context.filesDir`), never MediaStore / Gallery / shared storage.
 - **Nothing is auto-saved to the wardrobe.** Captures go to the review tray; only my approval creates or updates an Item/Version.
 - **My verified tags are never overwritten** by re-running tagging (store `source = user | model` per tag).

@@ -69,3 +69,6 @@ desktop.ini
 
 # ---------- Logs ----------
 *.log
+
+# ---------- Bundled ML models (fetched by scripts/fetch-models.sh) ----------
+android/app/src/main/assets/models/

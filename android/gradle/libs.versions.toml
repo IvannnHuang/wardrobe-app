@@ -15,6 +15,7 @@ ksp = "2.1.0-1.0.29"
 hilt = "2.54"
 hiltNavigationCompose = "1.2.0"
 room = "2.6.1"
+mediapipeTasks = "0.10.35"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -40,6 +41,7 @@ androidx-hilt-navigation-compose = { group = "androidx.hilt", name = "hilt-navig
 room-runtime = { group = "androidx.room", name = "room-runtime", version.ref = "room" }
 room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "room" }
 room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
+mediapipe-tasks-vision = { group = "com.google.mediapipe", name = "tasks-vision", version.ref = "mediapipeTasks" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

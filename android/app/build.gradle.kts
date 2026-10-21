@@ -17,6 +17,8 @@ android {
         versionCode = 1
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        // Tab S7+ is 64-bit ARM; skip native libs for other CPUs (no emulator use, see CLAUDE.md).
+        ndk { abiFilters += "arm64-v8a" }
     }
 
     buildTypes {
@@ -38,6 +40,10 @@ android {
     }
     buildFeatures {
         compose = true
+    }
+    androidResources {
+        // Keep model files uncompressed so MediaPipe can read them straight from the APK.
+        noCompress += "task"
     }
 }
 
@@ -66,6 +72,9 @@ dependencies {
     implementation(libs.room.runtime)
     implementation(libs.room.ktx)
     ksp(libs.room.compiler)
+
+    // On-device ML. Models are bundled in assets/models (see scripts/fetch-models.sh).
+    implementation(libs.mediapipe.tasks.vision)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
