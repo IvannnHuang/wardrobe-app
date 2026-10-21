@@ -1,5 +1,6 @@
 package dev.wardrobe.app.ui.camera
 
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
@@ -36,7 +37,12 @@ fun buildImageCapture(): ImageCapture = ImageCapture.Builder()
  * shot. The camera is released when the page closes or the app goes to the background.
  */
 @Composable
-fun CameraPreview(imageCapture: ImageCapture, imageAnalysis: ImageAnalysis, modifier: Modifier = Modifier) {
+fun CameraPreview(
+    imageCapture: ImageCapture,
+    imageAnalysis: ImageAnalysis,
+    modifier: Modifier = Modifier,
+    onCamera: (Camera?) -> Unit = {},
+) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val previewView = remember {
@@ -57,9 +63,16 @@ fun CameraPreview(imageCapture: ImageCapture, imageAnalysis: ImageAnalysis, modi
                 .build()
                 .apply { setSurfaceProvider(previewView.surfaceProvider) }
             cameraProvider.unbindAll()
-            cameraProvider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageCapture, imageAnalysis)
+            onCamera(
+                cameraProvider.bindToLifecycle(
+                    lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageCapture, imageAnalysis,
+                )
+            )
         }, ContextCompat.getMainExecutor(context))
-        onDispose { provider?.unbindAll() }
+        onDispose {
+            onCamera(null)
+            provider?.unbindAll()
+        }
     }
 
     AndroidView(factory = { previewView }, modifier = modifier)

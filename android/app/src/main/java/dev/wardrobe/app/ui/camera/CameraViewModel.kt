@@ -17,6 +17,10 @@ import dev.wardrobe.app.data.files.PhotoStore
 import dev.wardrobe.app.domain.capture.CaptureMode
 import dev.wardrobe.app.domain.capture.CaptureSession
 import dev.wardrobe.app.domain.capture.Shot
+import dev.wardrobe.app.domain.capture.judgeSharpness
+import dev.wardrobe.app.domain.capture.laplacianVariance
+import dev.wardrobe.app.domain.capture.personBox
+import dev.wardrobe.app.domain.capture.spoken
 import dev.wardrobe.app.domain.capture.landmarksJson
 import dev.wardrobe.app.domain.capture.pathsJson
 import dev.wardrobe.app.domain.model.Landmark
@@ -46,12 +50,22 @@ class CameraViewModel @Inject constructor(
     private val captureEntryDao: CaptureEntryDao,
 ) : ViewModel() {
 
-    data class LastShot(val thumbnail: ImageBitmap, val width: Int, val height: Int, val view: View)
+    /** [view] is null for a close-up. */
+    data class LastShot(
+        val thumbnail: ImageBitmap,
+        val width: Int,
+        val height: Int,
+        val view: View?,
+        val sharpness: Double,
+        val sharp: Boolean,
+    )
 
     data class UiState(
         val session: CaptureSession? = null,
-        /** Garment N of the session has been put in the review tray. */
-        val currentSaved: Boolean = false,
+        /** Garment N of the session has been put in the review tray (this CaptureEntry). */
+        val currentEntryId: Long? = null,
+        /** Taking a fabric close-up of the current garment instead of the 4 angles. */
+        val closeUpMode: Boolean = false,
         val capturing: Boolean = false,
         val lastShot: LastShot? = null,
         val hasBodyFigure: Boolean = false,
@@ -59,6 +73,7 @@ class CameraViewModel @Inject constructor(
         val message: String? = null,
     ) {
         val askHeight get() = session?.mode == CaptureMode.BODY_FIGURE && session.complete
+        val currentSaved get() = currentEntryId != null
     }
 
     private val _state = MutableStateFlow(UiState())
@@ -78,19 +93,26 @@ class CameraViewModel @Inject constructor(
     // ---------------------------------------------------------------- session control
 
     fun startBodyFigure() = _state.update {
-        it.copy(session = CaptureSession(CaptureMode.BODY_FIGURE, newKey()), currentSaved = false, lastShot = null)
+        it.copy(session = CaptureSession(CaptureMode.BODY_FIGURE, newKey()), currentEntryId = null, lastShot = null)
     }
 
     fun startSession() = _state.update {
-        it.copy(session = CaptureSession(CaptureMode.GARMENT, newKey()), currentSaved = false, lastShot = null)
+        it.copy(session = CaptureSession(CaptureMode.GARMENT, newKey()), currentEntryId = null, lastShot = null)
     }
 
-    fun choose(view: View) = _state.update { it.copy(session = it.session?.choose(view)) }
+    fun choose(view: View) = _state.update { it.copy(session = it.session?.choose(view), closeUpMode = false) }
+
+    /** Close-ups are optional and only once all 4 angles of a garment exist. */
+    fun startCloseUp() = _state.update {
+        if (it.session?.mode == CaptureMode.GARMENT && it.session.complete) it.copy(closeUpMode = true) else it
+    }
+
+    fun cancelCloseUp() = _state.update { it.copy(closeUpMode = false) }
 
     fun nextGarment() = _state.update { s ->
         val session = s.session ?: return@update s
         if (!session.complete) return@update s
-        s.copy(session = session.nextGarment(), currentSaved = false, lastShot = null)
+        s.copy(session = session.nextGarment(), currentEntryId = null, closeUpMode = false, lastShot = null)
     }
 
     /** Ends the session. A garment with fewer than 4 angles is discarded (its photos are deleted). */
@@ -109,7 +131,7 @@ class CameraViewModel @Inject constructor(
             val done = session.garmentsDone
             _state.update {
                 it.copy(
-                    session = null, currentSaved = false, lastShot = null,
+                    session = null, currentEntryId = null, closeUpMode = false, lastShot = null,
                     message = when (session.mode) {
                         CaptureMode.BODY_FIGURE -> "Body figure setup cancelled"
                         CaptureMode.GARMENT -> "Session finished: $done garment${if (done == 1) "" else "s"} in the review tray" +
@@ -159,11 +181,18 @@ class CameraViewModel @Inject constructor(
         viewModelScope.launch {
             try {
                 withContext(Dispatchers.IO) { photoStore.write(path, jpeg) }
-                val thumb = withContext(Dispatchers.Default) { decodeThumbnail(jpeg, view) }
+                val thumb = withContext(Dispatchers.Default) { decodeThumbnail(jpeg, view, landmarks) }
                 var updated: CaptureSession? = null
                 _state.update {
+                    // A blurry shot stays on disk, but that angle is queued again for an immediate retake.
                     updated = it.session?.withShot(view, Shot(path, landmarks))
-                    it.copy(session = updated, capturing = false, lastShot = thumb)
+                        ?.let { s -> if (thumb.sharp) s else s.choose(view) }
+                    it.copy(
+                        session = updated,
+                        capturing = false,
+                        lastShot = thumb,
+                        message = if (thumb.sharp) null else blurryMessage(view, thumb.sharpness),
+                    )
                 }
                 val now = updated ?: return@launch
                 if (now.mode == CaptureMode.GARMENT && now.complete && !_state.value.currentSaved) {
@@ -175,21 +204,59 @@ class CameraViewModel @Inject constructor(
         }
     }
 
+    private fun blurryMessage(view: View, sharpness: Double) =
+        "${view.spoken().replaceFirstChar { it.uppercase() }} was blurry (sharpness ${sharpness.toInt()}), retaking"
+
     /** All 4 angles exist: put the garment in the review tray. Later retakes overwrite the same files. */
     private suspend fun saveToTray(session: CaptureSession) {
-        withContext(Dispatchers.IO) {
+        val id = withContext(Dispatchers.IO) {
             captureEntryDao.insert(
                 CaptureEntryEntity(
                     sessionId = session.key,
-                    rawPathsJson = pathsJson(session.shots),
+                    rawPathsJson = pathsJson(session.shots, session.closeUp),
                     createdAt = System.currentTimeMillis(),
                 )
             )
         }
-        _state.update { it.copy(currentSaved = true) }
+        _state.update { it.copy(currentEntryId = id) }
     }
 
-    private fun decodeThumbnail(jpeg: ByteArray, view: View): LastShot {
+    /** Saves the fabric close-up of the current garment and adds it to its review-tray entry. */
+    fun saveCloseUp(jpeg: ByteArray) {
+        val s = _state.value
+        val session = s.session ?: return onCaptureFailed("No capture in progress")
+        val path = photoStore.closeUpPath(session.key, session.garmentNumber)
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) { photoStore.write(path, jpeg) }
+                val thumb = withContext(Dispatchers.Default) { decodeThumbnail(jpeg, null, emptyList()) }
+                val entryId = s.currentEntryId
+                if (entryId != null) {
+                    withContext(Dispatchers.IO) {
+                        captureEntryDao.get(entryId)?.let { entry ->
+                            captureEntryDao.update(entry.copy(rawPathsJson = pathsJson(session.shots, path)))
+                        }
+                    }
+                }
+                val note = if (thumb.sharp) "Close-up saved"
+                else "Close-up saved but looks blurry (sharpness ${thumb.sharpness.toInt()}). Tap Retake close-up."
+                _state.update {
+                    it.copy(
+                        session = it.session?.withCloseUp(path),
+                        capturing = false,
+                        closeUpMode = false,
+                        lastShot = thumb,
+                        message = note,
+                    )
+                }
+            } catch (e: Exception) {
+                onCaptureFailed("Could not save close-up: ${e.message}")
+            }
+        }
+    }
+
+    /** Small upright copy for the last-shot card, plus the sharpness of the area around me. */
+    private fun decodeThumbnail(jpeg: ByteArray, view: View?, landmarks: List<Landmark>): LastShot {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, bounds)
         val small = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, BitmapFactory.Options().apply { inSampleSize = 8 })
@@ -204,6 +271,21 @@ class CameraViewModel @Inject constructor(
         val upright = if (degrees == 0) small else
             Bitmap.createBitmap(small, 0, 0, small.width, small.height, Matrix().apply { postRotate(degrees.toFloat()) }, true)
         val (w, h) = if (degrees % 180 == 0) bounds.outWidth to bounds.outHeight else bounds.outHeight to bounds.outWidth
-        return LastShot(upright.asImageBitmap(), w, h, view)
+        val quality = judgeSharpness(sharpness(upright, personBox(landmarks)))
+        return LastShot(upright.asImageBitmap(), w, h, view, quality.sharpness, quality.sharp)
+    }
+
+    private fun sharpness(bitmap: Bitmap, box: FloatArray): Double {
+        val left = (box[0] * bitmap.width).toInt().coerceIn(0, bitmap.width - 3)
+        val top = (box[1] * bitmap.height).toInt().coerceIn(0, bitmap.height - 3)
+        val w = ((box[2] - box[0]) * bitmap.width).toInt().coerceIn(3, bitmap.width - left)
+        val h = ((box[3] - box[1]) * bitmap.height).toInt().coerceIn(3, bitmap.height - top)
+        val pixels = IntArray(w * h)
+        bitmap.getPixels(pixels, 0, w, left, top, w, h)
+        val gray = IntArray(pixels.size) { i ->
+            val p = pixels[i]
+            (((p shr 16) and 0xFF) * 299 + ((p shr 8) and 0xFF) * 587 + (p and 0xFF) * 114) / 1000
+        }
+        return laplacianVariance(gray, w, h)
     }
 }

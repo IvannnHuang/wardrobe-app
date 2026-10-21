@@ -47,7 +47,7 @@ wardrobe-app/
 ## Tech stack
 
 - **Android:** Kotlin, Jetpack Compose, Material 3, single-activity + Navigation Compose
-- **Camera:** CameraX (lock AE/AWB/AF per session via Camera2 interop)
+- **Camera:** CameraX (lock AE/AWB per session via Camera2 interop; AF stays continuous so close-ups can refocus)
 - **ML (bundled):** MediaPipe Tasks: Pose Landmarker, Image Segmenter (person mask). Mobile CLIP-type image model in TFLite for semantic tags.
 - **Image processing:** OpenCV for Android (or plain Kotlin/RenderScript replacement where simpler)
 - **Storage:** Room (SQLite) + files in `filesDir`

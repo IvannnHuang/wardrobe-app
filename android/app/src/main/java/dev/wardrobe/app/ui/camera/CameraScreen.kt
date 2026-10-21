@@ -10,6 +10,7 @@ import android.os.SystemClock
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.Camera
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.compose.foundation.Image
@@ -62,6 +63,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.wardrobe.app.capture.CameraLock
 import dev.wardrobe.app.capture.LivePoseAnalyzer
 import dev.wardrobe.app.domain.capture.AutoShutter
 import dev.wardrobe.app.domain.capture.CaptureMode
@@ -134,6 +136,15 @@ private fun CameraControls(viewModel: CameraViewModel = hiltViewModel()) {
     var autoMode by remember { mutableStateOf(true) }
     var check by remember { mutableStateOf<PoseCheckResult?>(null) }
     var confirmFinish by remember { mutableStateOf(false) }
+    // Exposure + white balance are locked from the first shot of a capture until it ends.
+    var camera by remember { mutableStateOf<Camera?>(null) }
+    var locked by remember { mutableStateOf(false) }
+    LaunchedEffect(session == null) {
+        if (session == null && locked) {
+            camera?.let { CameraLock.unlock(it) }
+            locked = false
+        }
+    }
     val beeper = remember { ToneGenerator(AudioManager.STREAM_MUSIC, 90) }
     DisposableEffect(Unit) { onDispose { beeper.release() } }
 
@@ -151,6 +162,7 @@ private fun CameraControls(viewModel: CameraViewModel = hiltViewModel()) {
     fun takePhoto(view: View) {
         val landmarks = pose?.landmarks.orEmpty()
         viewModel.onCaptureStarted()
+        if (!locked) camera?.let { CameraLock.lock(it); locked = true }
         // Write into memory first so CameraX includes the EXIF rotation; the ViewModel then saves it.
         val buffer = ByteArrayOutputStream()
         imageCapture.takePicture(
@@ -166,12 +178,33 @@ private fun CameraControls(viewModel: CameraViewModel = hiltViewModel()) {
         )
     }
 
+    fun takeCloseUp() {
+        val cam = camera ?: return
+        viewModel.onCaptureStarted()
+        // Refocus on the fabric held in the middle of the frame, then shoot (even if focus didn't settle).
+        val focus = CameraLock.focusCentre(cam)
+        focus.addListener({
+            val buffer = ByteArrayOutputStream()
+            imageCapture.takePicture(
+                ImageCapture.OutputFileOptions.Builder(buffer).build(),
+                ContextCompat.getMainExecutor(context),
+                object : ImageCapture.OnImageSavedCallback {
+                    override fun onImageSaved(output: ImageCapture.OutputFileResults) =
+                        viewModel.saveCloseUp(buffer.toByteArray())
+
+                    override fun onError(e: ImageCaptureException) =
+                        viewModel.onCaptureFailed("Capture failed: ${e.message}")
+                },
+            )
+        }, ContextCompat.getMainExecutor(context))
+    }
+
     LaunchedEffect(pose) {
         val frame = pose ?: return@LaunchedEffect
         val wanted = session?.wanted ?: View.FRONT
         val result = checker.check(frame, wanted, SystemClock.uptimeMillis())
         check = result
-        val shoot = session?.wanted != null && autoMode && !state.capturing && !state.askHeight
+        val shoot = session?.wanted != null && autoMode && !state.capturing && !state.askHeight && !state.closeUpMode
         if (autoShutter.update(shoot && result.ready, SystemClock.uptimeMillis())) {
             beeper.startTone(ToneGenerator.TONE_PROP_BEEP, 150)
             takePhoto(wanted)
@@ -179,7 +212,10 @@ private fun CameraControls(viewModel: CameraViewModel = hiltViewModel()) {
     }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
-        CameraPreview(imageCapture, imageAnalysis, Modifier.fillMaxSize())
+        CameraPreview(imageCapture, imageAnalysis, Modifier.fillMaxSize(), onCamera = {
+            camera = it
+            if (it == null) locked = false
+        })
         PoseOverlay(
             pose, Modifier.fillMaxSize(),
             color = if (check?.ready == true) Color(0xFF4CFF7A) else Color(0xFFFFB74D),
@@ -195,7 +231,7 @@ private fun CameraControls(viewModel: CameraViewModel = hiltViewModel()) {
                 modifier = Modifier.align(Alignment.Center),
             )
         } else {
-            HintBanner(session, check, autoMode, Modifier.align(Alignment.TopCenter).padding(top = 64.dp))
+            HintBanner(session, check, autoMode, state.closeUpMode, Modifier.align(Alignment.TopCenter).padding(top = 64.dp))
             SessionPanel(
                 session = session,
                 saved = state.currentSaved,
@@ -203,16 +239,19 @@ private fun CameraControls(viewModel: CameraViewModel = hiltViewModel()) {
                 onAutoMode = { autoMode = it },
                 onChoose = viewModel::choose,
                 onNextGarment = viewModel::nextGarment,
+                closeUpMode = state.closeUpMode,
+                onCloseUp = { if (state.closeUpMode) viewModel.cancelCloseUp() else viewModel.startCloseUp() },
                 onFinish = {
                     if (session.mode == CaptureMode.GARMENT && session.started && !session.complete) confirmFinish = true
                     else viewModel.finish()
                 },
                 modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
             )
-            session.wanted?.let { wanted ->
+            val wanted = session.wanted
+            if (state.closeUpMode || wanted != null) {
                 ShutterButton(
                     busy = state.capturing,
-                    onClick = { takePhoto(wanted) },
+                    onClick = { if (state.closeUpMode) takeCloseUp() else if (wanted != null) takePhoto(wanted) },
                     modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 24.dp),
                 )
             }
@@ -276,10 +315,17 @@ private fun StartPanel(
 }
 
 @Composable
-private fun HintBanner(session: CaptureSession, check: PoseCheckResult?, autoMode: Boolean, modifier: Modifier = Modifier) {
+private fun HintBanner(
+    session: CaptureSession,
+    check: PoseCheckResult?,
+    autoMode: Boolean,
+    closeUpMode: Boolean,
+    modifier: Modifier = Modifier,
+) {
     val wanted = session.wanted
     val ready = wanted != null && check?.ready == true
     val text = when {
+        closeUpMode -> "Close-up: hold the fabric 20–30 cm from the camera, then tap the shutter"
         wanted == null && session.mode == CaptureMode.BODY_FIGURE -> "All 4 angles done"
         wanted == null -> "Garment ${session.garmentNumber} done ✓ Change garment, then tap Next garment"
         check == null -> "Starting…"
@@ -306,6 +352,8 @@ private fun SessionPanel(
     onAutoMode: (Boolean) -> Unit,
     onChoose: (View) -> Unit,
     onNextGarment: () -> Unit,
+    closeUpMode: Boolean,
+    onCloseUp: () -> Unit,
     onFinish: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -333,6 +381,14 @@ private fun SessionPanel(
                 Text("Auto capture", color = Color.White, style = MaterialTheme.typography.bodyMedium)
                 Spacer(Modifier.width(8.dp))
                 Switch(checked = autoMode, onCheckedChange = onAutoMode)
+            }
+            if (session.mode == CaptureMode.GARMENT && session.complete) {
+                val label = when {
+                    closeUpMode -> "Cancel close-up"
+                    session.closeUp != null -> "✓ Retake close-up"
+                    else -> "Add close-up (optional)"
+                }
+                OutlinedButton(onClick = onCloseUp) { Text(label, color = Color.White) }
             }
             Row {
                 if (session.mode == CaptureMode.GARMENT) {
@@ -430,11 +486,16 @@ private fun LastShotCard(shot: CameraViewModel.LastShot, modifier: Modifier = Mo
             Spacer(Modifier.width(12.dp))
             Column {
                 Text(
-                    shot.view.spoken().replaceFirstChar { it.uppercase() }, color = Color.White,
+                    shot.view?.spoken()?.replaceFirstChar { it.uppercase() } ?: "Close-up", color = Color.White,
                     style = MaterialTheme.typography.titleSmall,
                 )
                 Text(
                     "${shot.width} × ${shot.height}", color = Color.White.copy(alpha = 0.8f),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    "Sharpness ${shot.sharpness.toInt()}" + if (shot.sharp) " ✓" else " (blurry)",
+                    color = if (shot.sharp) Color.White.copy(alpha = 0.8f) else Color(0xFFFFB74D),
                     style = MaterialTheme.typography.bodySmall,
                 )
             }

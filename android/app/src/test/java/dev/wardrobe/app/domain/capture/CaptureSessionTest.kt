@@ -56,12 +56,17 @@ class CaptureSessionTest {
         assertEquals(View.FRONT, s.wanted)
         assertFalse(s.started)
         assertEquals(1, s.garmentsDone)
+        assertEquals(null, s.withCloseUp("c.jpg").nextGarment().closeUp)
     }
 
     @Test
     fun jsonHelpers() {
         val shots = mapOf(View.RIGHT to shot("captures/s1/1/right.jpg"), View.FRONT to shot("captures/s1/1/front.jpg"))
         assertEquals("{\"front\":\"captures/s1/1/front.jpg\",\"right\":\"captures/s1/1/right.jpg\"}", pathsJson(shots))
+        assertEquals(
+            "{\"front\":\"captures/s1/1/front.jpg\",\"right\":\"captures/s1/1/right.jpg\",\"closeUp\":\"c.jpg\"}",
+            pathsJson(shots, "c.jpg"),
+        )
         assertEquals("{\"front\":[[0.5000,0.2500,0.900]],\"right\":[[0.5000,0.2500,0.900]]}", landmarksJson(shots))
     }
 

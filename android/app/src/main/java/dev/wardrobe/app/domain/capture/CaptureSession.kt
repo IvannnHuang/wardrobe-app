@@ -23,6 +23,8 @@ data class CaptureSession(
     val wanted: View? = View.FRONT,
     /** Garments completed in this session so far (including the current one once complete). */
     val garmentsDone: Int = 0,
+    /** Optional fabric close-up of the current garment. */
+    val closeUp: String? = null,
 ) {
     val complete get() = wanted == null && shots.size == View.entries.size
     val started get() = shots.isNotEmpty()
@@ -43,7 +45,9 @@ data class CaptureSession(
     fun choose(view: View) = copy(wanted = view)
 
     /** Start the next garment of the same session. */
-    fun nextGarment() = copy(garmentNumber = garmentNumber + 1, shots = emptyMap(), wanted = View.FRONT)
+    fun nextGarment() = copy(garmentNumber = garmentNumber + 1, shots = emptyMap(), wanted = View.FRONT, closeUp = null)
+
+    fun withCloseUp(path: String) = copy(closeUp = path)
 }
 
 /** Landmarks per view as compact JSON: {"front":[[x,y,visibility],...],...}. Normalised 0..1 coordinates. */
@@ -54,9 +58,10 @@ fun landmarksJson(shots: Map<View, Shot>): String =
         }
     }
 
-/** Raw photo paths per view as JSON: {"front":"captures/...","right":...}. */
-fun pathsJson(shots: Map<View, Shot>): String =
-    View.entries.filter { it in shots }.joinToString(",", "{", "}") { "\"${it.key}\":\"${shots.getValue(it).path}\"" }
+/** Raw photo paths per view as JSON: {"front":"captures/...","right":...,"closeUp":...}. */
+fun pathsJson(shots: Map<View, Shot>, closeUp: String? = null): String =
+    (View.entries.filter { it in shots }.map { it.key to shots.getValue(it).path } + listOfNotNull(closeUp?.let { "closeUp" to it }))
+        .joinToString(",", "{", "}") { (k, v) -> "\"$k\":\"$v\"" }
 
 /** Parses a height typed as "175", "175.5" or "175 cm". Returns null if it's not a plausible adult height. */
 fun parseHeightCm(text: String): Float? =
