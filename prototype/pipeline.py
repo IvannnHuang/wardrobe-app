@@ -55,6 +55,8 @@ class Settings:
     edge_band_px: int = 16          # beyond this distance from visible base outfit, person pixels count as garment
     min_component_frac: float = 0.02  # drop blobs smaller than this fraction of the largest blob
     feather_px: float = 1.5
+    fill_hidden: bool = True        # inpaint garment areas hidden behind a hand/phone
+    inpaint_radius: int = 6
 
 
 @dataclass
@@ -75,6 +77,7 @@ class Report:
     align_error_px: float = 0.0
     lighting_shift_lab: list[float] = field(default_factory=list)
     garment_area_frac: float = 0.0
+    filled_frac: float = 0.0        # share of the garment that was invented by inpainting
     removed_px: dict[str, int] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     seconds: float = 0.0
@@ -195,7 +198,7 @@ def reference_colours(body: Analysis, lab_b: np.ndarray, reliable: np.ndarray) -
     return lab_b[iy, ix], dist
 
 
-def phone_hand_region(a: Analysis) -> np.ndarray:
+def phone_hand_region(a: Analysis) -> tuple[np.ndarray, float]:
     """Mirror selfies: box around the raised (phone-holding) hand, extended upward over the phone."""
     h, w = a.rgb.shape[:2]
     hand = min(HANDS, key=lambda ids: a.landmarks[ids[0], 1])  # higher wrist = phone hand
@@ -205,7 +208,35 @@ def phone_hand_region(a: Analysis) -> np.ndarray:
     x1, y1 = pts.max(axis=0) + (size * 0.8, size * 0.6)
     region = np.zeros((h, w), bool)
     region[max(0, int(y0)):min(h, int(y1)), max(0, int(x0)):min(w, int(x1))] = True
-    return region
+    return region, size
+
+
+def torso_region(a: Analysis, grow: float = 0.15) -> np.ndarray:
+    """Quad through shoulders and hips, slightly enlarged. Skin inside it is a hand in front of the body."""
+    pts = a.landmarks[[11, 12, 24, 23], :2]
+    centre = pts.mean(axis=0)
+    pts = centre + (pts - centre) * (1 + grow)
+    mask = np.zeros(a.rgb.shape[:2], np.uint8)
+    cv2.fillPoly(mask, [pts.astype(np.int32)], 1)
+    return mask.astype(bool)
+
+
+def fill_hidden(rgb: np.ndarray, keep: np.ndarray, hidden: np.ndarray, s: Settings) -> np.ndarray:
+    """Inpaint `hidden` using only garment pixels as the source (everything else is marked unknown,
+    so white tee or skin next to the hole can't bleed in)."""
+    ys, xs = np.nonzero(keep | hidden)
+    h, w = keep.shape
+    y0, y1 = max(0, ys.min() - 20), min(h, ys.max() + 21)
+    x0, x1 = max(0, xs.min() - 20), min(w, xs.max() + 21)
+    crop = np.ascontiguousarray(rgb[y0:y1, x0:x1])
+    # Shrink the source a little so mixed edge pixels (skin/phone fringe) don't bleed into the fill.
+    source = cv2.erode(keep[y0:y1, x0:x1].astype(np.uint8), np.ones((7, 7), np.uint8))
+    unknown = (1 - source) * 255
+    filled = cv2.inpaint(crop, unknown, s.inpaint_radius, cv2.INPAINT_TELEA)
+    out = rgb.copy()
+    region = hidden[y0:y1, x0:x1]
+    out[y0:y1, x0:x1][region] = filled[region]
+    return out
 
 
 def cleanup(mask: np.ndarray, s: Settings) -> np.ndarray:
@@ -224,8 +255,13 @@ def cut_out(garment: Analysis, valid: np.ndarray, body: Analysis, s: Settings, r
     """Returns (RGBA cut-out, reason map, colour change). Reason codes are listed in REASONS."""
     person_g = (garment.person > s.person_threshold) & valid
     person_b = body.person > s.person_threshold
-    blocked_g = phone_hand_region(garment) if s.mirror else np.zeros_like(person_g)
-    blocked_b = phone_hand_region(body) if s.mirror else np.zeros_like(person_b)
+    if s.mirror:
+        box_g, hand_size = phone_hand_region(garment)
+        blocked_b, _ = phone_hand_region(body)
+    else:
+        box_g, hand_size = np.zeros_like(person_g), 25.0
+        blocked_b = np.zeros_like(person_b)
+    blocked_g = box_g.copy()
 
     lab_b = to_lab(body.rgb)
     lab_g = match_lighting(to_lab(garment.rgb), lab_b, ~person_g & ~person_b & valid, report)
@@ -250,20 +286,48 @@ def cut_out(garment: Analysis, valid: np.ndarray, body: Analysis, s: Settings, r
     raw &= ~blocked_g
     keep = cleanup(raw, s)
 
+    # Hidden garment = something in front of it (hand on the torso, phone), as opposed to base outfit
+    # showing through (e.g. tee in an open zip), which stays transparent. Closing merges hand + phone
+    # and swallows small dark bits between them (the phone's camera bump).
+    hidden = np.zeros_like(keep)
+    rgb = garment.rgb
+    if s.fill_hidden and keep.any():
+        in_front = (blocked_g | ((garment.classes == BODY_SKIN) & torso_region(garment))) & changed
+        k = max(15, int(hand_size * 0.6)) | 1
+        closed = cv2.morphologyEx((person_g & in_front).astype(np.uint8), cv2.MORPH_CLOSE,
+                                  cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))).astype(bool)
+        # Never fill what matches the base top colour (tee in an open zip stays transparent).
+        top_b = reliable_b & torso_region(body)
+        base_top = np.median(lab_b[top_b], axis=0) if top_b.any() else lab_b.reshape(-1, 3).mean(axis=0)
+        base_like = np.linalg.norm(lab_g - base_top, axis=2) < s.change_threshold
+        hidden = closed & person_g & (changed | keep) & ~base_like
+        # Mop up mixed edge pixels (finger outlines) left between the fill and the garment.
+        solid = cv2.morphologyEx((keep | hidden).astype(np.uint8), cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+        hidden |= solid.astype(bool) & person_g & ~keep & ~base_like & cv2.dilate(
+            hidden.astype(np.uint8), np.ones((9, 9), np.uint8)).astype(bool)
+        keep &= ~hidden
+        rgb = fill_hidden(garment.rgb, keep, hidden, s)
+
     reason = np.zeros(person_b.shape, np.uint8)            # 0 background
     reason[person_g] = 4                                   # removed by cleanup (default inside person)
     reason[person_g & ~changed] = 2                        # same as base outfit on body figure
     reason[person_g & skin_hair] = 1                       # skin / hair
     reason[person_g & blocked_g] = 3                       # hand + phone (mirror mode)
     reason[keep] = 5                                       # kept as garment
+    reason[hidden] = 6                                     # hidden, filled by inpainting
 
-    report.garment_area_frac = round(float(keep.mean()), 4)
+    garment_mask = keep | hidden
+    report.garment_area_frac = round(float(garment_mask.mean()), 4)
+    report.filled_frac = round(float(hidden.sum() / max(1, garment_mask.sum())), 4)
     report.removed_px = {REASONS[i][0]: int((reason == i).sum()) for i in range(1, 5)}
     if keep.sum() == 0:
         report.warnings.append("nothing kept: garment looks identical to the body figure")
+    if report.filled_frac > 0.03:
+        report.warnings.append(f"{report.filled_frac:.1%} of the garment is filled in (hidden behind hand/phone)")
 
-    alpha = cv2.GaussianBlur(keep.astype(np.float32), (0, 0), s.feather_px) * np.clip(garment.person * 1.5, 0, 1)
-    rgba = np.dstack([garment.rgb, (alpha * 255).astype(np.uint8)])
+    alpha = cv2.GaussianBlur(garment_mask.astype(np.float32), (0, 0), s.feather_px)
+    alpha *= np.clip(np.maximum(garment.person, hidden) * 1.5, 0, 1)
+    rgba = np.dstack([rgb, (alpha * 255).astype(np.uint8)])
     return rgba, reason, change
 
 
@@ -275,6 +339,7 @@ REASONS = {
     3: ("hand_phone", (200, 0, 200)),      # purple
     4: ("cleanup", (0, 0, 255)),           # red
     5: ("kept", (0, 200, 0)),              # green
+    6: ("filled", (255, 255, 0)),          # cyan
 }
 
 
@@ -330,7 +395,7 @@ def comparison_sheet(body: Analysis, garment: Analysis, rgba, reason, change, re
 
     legend = np.full((40, sheet.shape[1], 3), 30, np.uint8)
     x = 10
-    for code in (5, 1, 2, 3, 4):
+    for code in (5, 6, 1, 2, 3, 4):
         name, bgr = REASONS[code]
         cv2.rectangle(legend, (x, 10), (x + 20, 30), bgr, -1)
         cv2.putText(legend, name, (x + 28, 27), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
@@ -385,7 +450,7 @@ def main() -> None:
             except RuntimeError as e:
                 print(f"FAIL {garment_dir.name}/{view}: {e}")
                 continue
-            print(f"OK   {r.garment}/{r.view}: garment {r.garment_area_frac:.1%} of frame, "
+            print(f"OK   {r.garment}/{r.view}: garment {r.garment_area_frac:.1%} of frame, filled {r.filled_frac:.1%}, "
                   f"align error {r.align_error_px:.1f}px, {r.seconds}s")
             for w in r.warnings:
                 print(f"     ! {w}")
