@@ -214,8 +214,8 @@ def _bone_inverse(src: np.ndarray, dst: np.ndarray, a: int, b: int) -> np.ndarra
 
 
 def _limit_turns(src: np.ndarray, dst: np.ndarray, max_turn_deg: float) -> tuple[np.ndarray, list[str]]:
-    """Limbs whose bones would have to rotate more than `max_turn_deg` are left where they are (moved
-    with the torso only): big rotations can't be faked by bending pixels, they just smear."""
+    """Limbs whose bones would have to rotate more than `max_turn_deg` are held where they are (moved
+    with the torso only) for the smooth bend: big rotations smear. `repose` then moves them as rigid pieces."""
     torso = cv2.estimateAffinePartial2D(src[list(TORSO), :2], dst[list(TORSO), :2])[0]
     dst = dst.copy()
     skipped = []
@@ -229,21 +229,48 @@ def _limit_turns(src: np.ndarray, dst: np.ndarray, max_turn_deg: float) -> tuple
             ids = sorted({i for bone in bones for i in bone} - set(TORSO))
             ids += [i for hand in HANDS if hand[0] in ids for i in hand[1:]]
             dst[ids, :2] = src[ids, :2] @ torso[:, :2].T + torso[:, 2]
-            skipped.append(f"{name} ({max(turns):.0f} deg)")
+            skipped.append(name)
     return dst, skipped
+
+
+def _limb_pieces(lm: np.ndarray, person: np.ndarray, limb: str, radius_frac: float = 0.22) -> list[np.ndarray]:
+    """Person pixels belonging to each bone of `limb` (within a radius of the bone line). The radius is
+    based on the limb's length, so a sleeve held across the chest is cut out with the arm, not the torso.
+    Pieces overlap a little at the joints so straightening an elbow doesn't open a gap."""
+    bones = LIMBS[limb]
+    length = np.mean([np.linalg.norm(lm[b, :2] - lm[a, :2]) for a, b in bones[:2]])
+    radius = max(12, int(radius_frac * length))
+    pieces = []
+    for a, b in bones:
+        piece = np.zeros(person.shape, np.uint8)
+        cv2.line(piece, tuple(int(v) for v in lm[a, :2]), tuple(int(v) for v in lm[b, :2]), 1, 2 * radius)
+        cv2.circle(piece, tuple(int(v) for v in lm[b, :2]), radius, 1, -1)
+        pieces.append(piece.astype(bool) & (person > 0.5))
+    if limb.endswith("arm"):  # the hand piece also takes whatever the hand is holding
+        hand = next(h for h in HANDS if h[0] == bones[-1][0])
+        pts = lm[list(hand), :2]
+        centre = pts.mean(axis=0)
+        reach = max(radius, int(1.6 * np.max(np.linalg.norm(pts - centre, axis=1))))
+        held = np.zeros(person.shape, np.uint8)
+        cv2.circle(held, tuple(int(v) for v in centre), reach, 1, -1)
+        pieces[-1] |= held.astype(bool) & (person > 0.5)
+    return pieces
 
 
 def repose(images: list[np.ndarray], src: np.ndarray, dst: np.ndarray, person: np.ndarray,
            interps: list[int], max_turn_deg: float = 40.0, reach_px: float = 80.0):
-    """Bend images from pose `src` to pose `dst` (33x3 landmarks in the same frame).
+    """Move images from pose `src` to pose `dst` (33x3 landmarks in the same frame).
 
-    Torso, upper arm, forearm+hand, thigh and shin each get their own similarity transform; every pixel
-    follows a blend of the nearby bones weighted by distance (linear blend skinning). Pixels further than
-    about `reach_px` from the skeleton stay put, so the background doesn't bend. Where a limb moves away
-    from something it covered, the uncovered pixels would just repeat the limb, so they are marked invalid
-    (transparent) instead. Returns (warped images, valid mask, final target landmarks, skipped limbs)."""
+    Small changes: torso, upper arm, forearm+hand, thigh and shin each get their own similarity transform
+    and every pixel follows a distance-weighted blend of nearby bones (linear blend skinning). Pixels
+    further than about `reach_px` from the skeleton stay put, so the background doesn't bend.
+    Big changes (a bone turning more than `max_turn_deg`): blending would smear, so that limb is cut into
+    rigid pieces (upper / lower / hand) that are rotated into place and laid on top.
+    Either way, what a moved limb used to cover is left transparent (invalid), never duplicated or filled.
+    Returns (warped images, valid mask, final target landmarks, limbs moved as rigid pieces)."""
     h, w = person.shape
-    dst, skipped = _limit_turns(src, dst, max_turn_deg)
+    full_dst = dst
+    dst, rigid = _limit_turns(src, dst, max_turn_deg)
     dst_maps, dst_groups = _distance_maps(dst, (h, w))
     _, src_groups = _distance_maps(src, (h, w))
 
@@ -280,7 +307,28 @@ def repose(images: list[np.ndarray], src: np.ndarray, dst: np.ndarray, person: n
     src_person = cv2.remap(person, map_x, map_y, cv2.INTER_LINEAR) > 0.5
     ghost = (owner != target_group) & (own_d * 2 < tgt_d) & src_person
     inside = (map_x >= 0) & (map_x < w - 1) & (map_y >= 0) & (map_y < h - 1)
-    return warped, inside & ~ghost, dst, skipped
+    valid = inside & ~ghost
+
+    for limb in rigid:
+        pieces = _limb_pieces(src, person, limb)
+        # Remove the limb from where it was ...
+        old = cv2.remap(np.any(pieces, axis=0).astype(np.uint8), map_x, map_y, cv2.INTER_NEAREST) > 0
+        valid &= ~old
+        # ... and lay each rigid piece down at its new place, upper arm first, hand last (on top).
+        for (a, b), piece in zip(LIMBS[limb], pieces):
+            m = _bone_inverse(src, full_dst, a, b)
+            sx = (m[0, 0] * xx + m[0, 1] * yy + m[0, 2]).astype(np.float32)
+            sy = (m[1, 0] * xx + m[1, 1] * yy + m[1, 2]).astype(np.float32)
+            laid = cv2.remap(piece.astype(np.uint8), sx, sy, cv2.INTER_NEAREST, borderValue=0) > 0
+            for k, (img, interp) in enumerate(zip(images, interps)):
+                moved = cv2.remap(img, sx, sy, interp, borderValue=0)
+                warped[k][laid] = moved[laid]
+            valid |= laid
+        ids = sorted({i for bone in LIMBS[limb] for i in bone} - set(TORSO))
+        ids += [i for hand in HANDS if hand[0] in ids for i in hand[1:]]
+        dst = dst.copy()
+        dst[ids, :2] = full_dst[ids, :2]
+    return warped, valid, dst, rigid
 
 
 def repose_analysis(a: Analysis, valid: np.ndarray, dst: np.ndarray, report: Report) -> tuple[Analysis, np.ndarray]:
@@ -288,7 +336,7 @@ def repose_analysis(a: Analysis, valid: np.ndarray, dst: np.ndarray, report: Rep
         [a.rgb, a.person, a.classes, valid.astype(np.uint8)], a.landmarks, dst, a.person,
         [cv2.INTER_LINEAR, cv2.INTER_LINEAR, cv2.INTER_NEAREST, cv2.INTER_NEAREST])
     for limb in skipped:
-        report.warnings.append(f"repose: {limb} turn too large, left as captured; retake in the standard pose")
+        report.warnings.append(f"repose: {limb} turned a lot, moved as rigid pieces (expect a crease at the joint)")
     landmarks = final.copy()
     landmarks[:, 2] = a.landmarks[:, 2]
     return Analysis(rgb, landmarks, np.where(ok, person, 0).astype(np.float32), classes), v.astype(bool) & ok
@@ -519,10 +567,11 @@ def process(models: Models, body: Analysis, garment_dir: Path, view: str, s: Set
 
     extra = []
     if s.arms_down:
-        (body_rgb,), _, target, skipped = repose([body.rgb], body.landmarks, arms_down_pose(body.landmarks),
-                                                 body.person, [cv2.INTER_LINEAR])
-        for limb in skipped:
-            report.warnings.append(f"arms-down: {limb} turn too large, left as captured")
+        (body_rgb,), body_ok, target, rigid = repose([body.rgb], body.landmarks, arms_down_pose(body.landmarks),
+                                                     body.person, [cv2.INTER_LINEAR])
+        body_rgb = np.where(body_ok[..., None], body_rgb, checkerboard(*body_ok.shape))
+        for limb in rigid:
+            report.warnings.append(f"arms-down: {limb} turned a lot, moved as rigid pieces")
         (cut_rgb, cut_alpha), ok, _, _ = repose([rgba[..., :3], rgba[..., 3]], body.landmarks, target,
                                                 body.person, [cv2.INTER_LINEAR, cv2.INTER_LINEAR])
         rgba_down = np.dstack([cut_rgb, np.where(ok, cut_alpha, 0).astype(np.uint8)])
