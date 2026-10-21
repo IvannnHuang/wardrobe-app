@@ -10,7 +10,7 @@ android {
 
     defaultConfig {
         applicationId = "dev.wardrobe.app"
-        minSdk = 29          // Galaxy Tab S7 shipped with Android 10
+        minSdk = 29          // Galaxy Tab S7+ shipped with Android 10
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"

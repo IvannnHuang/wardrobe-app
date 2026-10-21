@@ -1,6 +1,6 @@
 # Wardrobe Pairing App
 
-Personal Android tablet app (Galaxy Tab S7) for capturing clothes one garment at a time, auto-cutting and tagging them on-device, and building layered outfits on my own body figure. Everything runs locally; no photos leave the tablet.
+Personal Android tablet app (Galaxy Tab S7+) for capturing clothes one garment at a time, auto-cutting and tagging them on-device, and building layered outfits on my own body figure. Everything runs locally; no photos leave the tablet.
 
 Full project plan and rules: [CLAUDE.md](CLAUDE.md)
 
@@ -14,7 +14,7 @@ Full project plan and rules: [CLAUDE.md](CLAUDE.md)
 
 ## Setup
 
-### Tablet (Galaxy Tab S7)
+### Tablet (Galaxy Tab S7+)
 1. Settings → About tablet → Software information → tap **Build number** 7 times.
 2. Settings → Developer options → enable **USB debugging** (and optionally **Wireless debugging**).
 3. Connect by USB-C and accept the prompt. Check with `adb devices`.

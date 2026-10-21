@@ -24,7 +24,7 @@ Single user (me), single device. Draft 1 = everything below. Draft 2 = auto-pair
 
 ## Hardware and capture setup
 
-- Device: **Samsung Galaxy Tab S7** (Snapdragon 865+, 13MP rear AF + 5MP ultra-wide, 8MP front). minSdk 29 (shipped Android 10); test on the device's current Android version.
+- Device: **Samsung Galaxy Tab S7+** (SM-T970, Snapdragon 865+, 13MP rear AF + 5MP ultra-wide, 8MP front). minSdk 29 (shipped Android 10); currently runs Android 13 — test on that.
 - Use the **13MP rear main camera**, portrait, tripod at about chest height, fixed position.
 - Fixed LED lighting, plain light wall, tape floor mark.
 - **Base outfit**: fitted, one solid color I don't own clothes in (e.g. muted teal). Every garment is captured over it.
@@ -180,7 +180,7 @@ LayerRule      category, rank, flags(JSON)
 | 1. Capture | Body figure setup, session flow, voice, pose auto-capture, quality check, close-up | Several garments captured in one session, hands-free |
 | 2. Processing | WorkManager batch; alignment; cut-out; color, coverage, thickness, rise, leg shape, sheerness | Test set produces clean cut-outs with correct measured tags |
 | 3. Review + storage | Image-model tags, matching, review screen, touch-up, versions, wardrobe page, re-run tagging | A batch goes from capture to approved wardrobe in-app |
-| 4. Pairing | Rules config, layered drawing, alignment, layer stack, swiping, versions, rotate, save/wear | All rule cases draw correctly; smooth on Tab S7 |
+| 4. Pairing | Rules config, layered drawing, alignment, layer stack, swiping, versions, rotate, save/wear | All rule cases draw correctly; smooth on Tab S7+ |
 | 5. Remote + polish | Ktor phone remote, BT shutter, comfort prompts, learning from corrections, local backup, firewall check | Daily use with my real wardrobe |
 
 **Phase-zero rule:** prove cut-out and measured tags in `prototype/` (Python) on real test photos **before** porting to Kotlin. If results are poor, fix the physical setup (lighting, base color) first.
