@@ -5,6 +5,7 @@
          INTERNET (LAN-only phone remote) is added in Phase 5. -->
 
     <application
+        android:name=".WardrobeApplication"
         android:allowBackup="false"
         android:label="@string/app_name"
         android:supportsRtl="true"
