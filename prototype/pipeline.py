@@ -44,6 +44,17 @@ ALIGN_POINTS = (11, 12, 23, 24, 25, 26, 27, 28)
 # Wrist, pinky, index, thumb for each hand.
 HANDS = ((15, 17, 19, 21), (16, 18, 20, 22))
 
+# Skeleton used to repose garments: torso quad + limb bones (landmark id pairs), grouped per body part.
+TORSO = (11, 12, 24, 23)
+LIMBS = {
+    "left_arm": ((11, 13), (13, 15), (15, 19)),
+    "right_arm": ((12, 14), (14, 16), (16, 20)),
+    "left_leg": ((23, 25), (25, 27)),
+    "right_leg": ((24, 26), (26, 28)),
+}
+GROUPS = ("torso", *LIMBS)
+LIMB_POINTS = (13, 14, 15, 16, 25, 26, 27, 28)  # elbows, wrists, knees, ankles
+
 
 @dataclass
 class Settings:
@@ -55,6 +66,8 @@ class Settings:
     edge_band_px: int = 16          # beyond this distance from visible base outfit, person pixels count as garment
     min_component_frac: float = 0.02  # drop blobs smaller than this fraction of the largest blob
     feather_px: float = 1.5
+    repose: bool = True             # bend the garment's limbs onto the body figure's limbs before cutting out
+    arms_down: bool = False         # also output garment + body figure in a standard arms-down pose
 
 
 @dataclass
@@ -73,6 +86,8 @@ class Report:
     align_scale: float = 0.0
     align_rotation_deg: float = 0.0
     align_error_px: float = 0.0
+    limb_error_before_px: float = 0.0   # elbows/wrists/knees/ankles vs body figure, after global align
+    limb_error_after_px: float = 0.0    # ... and after reposing
     lighting_shift_lab: list[float] = field(default_factory=list)
     garment_area_frac: float = 0.0
     removed_px: dict[str, int] = field(default_factory=dict)
@@ -163,6 +178,145 @@ def align(garment: Analysis, body: Analysis, s: Settings, report: Report) -> tup
         classes=warp(garment.classes, cv2.INTER_NEAREST),
     )
     return warped, valid
+
+
+# ---------------------------------------------------------------- reposing
+
+def _bones() -> list[tuple[int, tuple[int, int]]]:
+    """(group index, (landmark a, landmark b)) for every limb bone."""
+    return [(GROUPS.index(g), b) for g, bones in LIMBS.items() for b in bones]
+
+
+def _distance_maps(lm: np.ndarray, shape: tuple[int, int]) -> tuple[list[np.ndarray], np.ndarray]:
+    """Distance (px) from every pixel to the torso and to each bone, plus per-group distance (GxHxW)."""
+    h, w = shape
+    torso = np.full((h, w), 255, np.uint8)
+    cv2.fillPoly(torso, [lm[list(TORSO), :2].astype(np.int32)], 0)
+    maps = [cv2.distanceTransform(torso, cv2.DIST_L2, 5)]
+    for _, (a, b) in _bones():
+        line = np.full((h, w), 255, np.uint8)
+        cv2.line(line, tuple(int(v) for v in lm[a, :2]), tuple(int(v) for v in lm[b, :2]), 0, 3)
+        maps.append(cv2.distanceTransform(line, cv2.DIST_L2, 5))
+    groups = [0] + [g for g, _ in _bones()]
+    per_group = np.stack([np.min([m for m, g in zip(maps, groups) if g == gi], axis=0)
+                          for gi in range(len(GROUPS))])
+    return maps, per_group
+
+
+def _bone_inverse(src: np.ndarray, dst: np.ndarray, a: int, b: int) -> np.ndarray:
+    """2x3 similarity mapping target-pose pixels around bone a->b back to the source photo."""
+    d_src, d_dst = src[b, :2] - src[a, :2], dst[b, :2] - dst[a, :2]
+    rot = np.eye(2)
+    if np.hypot(*d_dst) >= 1:
+        z = complex(*d_src) / complex(*d_dst)
+        rot = np.array([[z.real, -z.imag], [z.imag, z.real]])
+    return np.hstack([rot, (src[a, :2] - rot @ dst[a, :2])[:, None]])
+
+
+def _limit_turns(src: np.ndarray, dst: np.ndarray, max_turn_deg: float) -> tuple[np.ndarray, list[str]]:
+    """Limbs whose bones would have to rotate more than `max_turn_deg` are left where they are (moved
+    with the torso only): big rotations can't be faked by bending pixels, they just smear."""
+    torso = cv2.estimateAffinePartial2D(src[list(TORSO), :2], dst[list(TORSO), :2])[0]
+    dst = dst.copy()
+    skipped = []
+    for name, bones in LIMBS.items():
+        turns = []
+        for a, b in bones:
+            d_src, d_dst = src[b, :2] - src[a, :2], dst[b, :2] - dst[a, :2]
+            turn = np.degrees(np.arctan2(d_dst[1], d_dst[0]) - np.arctan2(d_src[1], d_src[0]))
+            turns.append(abs((turn + 180) % 360 - 180))
+        if max(turns) > max_turn_deg:
+            ids = sorted({i for bone in bones for i in bone} - set(TORSO))
+            ids += [i for hand in HANDS if hand[0] in ids for i in hand[1:]]
+            dst[ids, :2] = src[ids, :2] @ torso[:, :2].T + torso[:, 2]
+            skipped.append(f"{name} ({max(turns):.0f} deg)")
+    return dst, skipped
+
+
+def repose(images: list[np.ndarray], src: np.ndarray, dst: np.ndarray, person: np.ndarray,
+           interps: list[int], max_turn_deg: float = 40.0, reach_px: float = 80.0):
+    """Bend images from pose `src` to pose `dst` (33x3 landmarks in the same frame).
+
+    Torso, upper arm, forearm+hand, thigh and shin each get their own similarity transform; every pixel
+    follows a blend of the nearby bones weighted by distance (linear blend skinning). Pixels further than
+    about `reach_px` from the skeleton stay put, so the background doesn't bend. Where a limb moves away
+    from something it covered, the uncovered pixels would just repeat the limb, so they are marked invalid
+    (transparent) instead. Returns (warped images, valid mask, final target landmarks, skipped limbs)."""
+    h, w = person.shape
+    dst, skipped = _limit_turns(src, dst, max_turn_deg)
+    dst_maps, dst_groups = _distance_maps(dst, (h, w))
+    _, src_groups = _distance_maps(src, (h, w))
+
+    transforms = [cv2.estimateAffinePartial2D(dst[list(TORSO), :2], src[list(TORSO), :2])[0]]
+    transforms += [_bone_inverse(src, dst, a, b) for _, (a, b) in _bones()]
+    transforms.append(np.hstack([np.eye(2), np.zeros((2, 1))]))      # identity for far-away pixels
+    dst_maps.append(np.full((h, w), reach_px, np.float32))
+
+    yy, xx = np.mgrid[:h, :w].astype(np.float32)
+    map_x = np.zeros((h, w), np.float32)
+    map_y = np.zeros((h, w), np.float32)
+    total = np.zeros((h, w), np.float32)
+    for m, d in zip(transforms, dst_maps):
+        wgt = 1.0 / (d + 4.0) ** 4
+        map_x += wgt * (m[0, 0] * xx + m[0, 1] * yy + m[0, 2])
+        map_y += wgt * (m[1, 0] * xx + m[1, 1] * yy + m[1, 2])
+        total += wgt
+    map_x /= total
+    map_y /= total
+
+    warped = [cv2.remap(img, map_x, map_y, interp, borderValue=0) for img, interp in zip(images, interps)]
+
+    # Ownership check: the source pixel must belong to the body part the target pixel belongs to.
+    target_group = np.argmin(dst_groups, axis=0)
+    src_owner = np.argmin(src_groups, axis=0).astype(np.uint8)
+    owner = cv2.remap(src_owner, map_x, map_y, cv2.INTER_NEAREST, borderValue=0)
+    own_d = cv2.remap(np.min(src_groups, axis=0), map_x, map_y, cv2.INTER_LINEAR)
+    # distance, in the source, from the sampled pixel to the part it should belong to
+    tgt_d = np.zeros((h, w), np.float32)
+    for gi in range(len(GROUPS)):
+        sel = target_group == gi
+        if sel.any():
+            tgt_d[sel] = cv2.remap(src_groups[gi], map_x, map_y, cv2.INTER_LINEAR)[sel]
+    src_person = cv2.remap(person, map_x, map_y, cv2.INTER_LINEAR) > 0.5
+    ghost = (owner != target_group) & (own_d * 2 < tgt_d) & src_person
+    inside = (map_x >= 0) & (map_x < w - 1) & (map_y >= 0) & (map_y < h - 1)
+    return warped, inside & ~ghost, dst, skipped
+
+
+def repose_analysis(a: Analysis, valid: np.ndarray, dst: np.ndarray, report: Report) -> tuple[Analysis, np.ndarray]:
+    (rgb, person, classes, v), ok, final, skipped = repose(
+        [a.rgb, a.person, a.classes, valid.astype(np.uint8)], a.landmarks, dst, a.person,
+        [cv2.INTER_LINEAR, cv2.INTER_LINEAR, cv2.INTER_NEAREST, cv2.INTER_NEAREST])
+    for limb in skipped:
+        report.warnings.append(f"repose: {limb} turn too large, left as captured; retake in the standard pose")
+    landmarks = final.copy()
+    landmarks[:, 2] = a.landmarks[:, 2]
+    return Analysis(rgb, landmarks, np.where(ok, person, 0).astype(np.float32), classes), v.astype(bool) & ok
+
+
+def arms_down_pose(lm: np.ndarray, upper_deg: float = 8.0, fore_deg: float = 12.0) -> np.ndarray:
+    """Same body with both arms hanging down, slightly out from the body (angles from vertical)."""
+    out = lm.copy()
+    for shoulder, elbow, wrist, hand, other in ((11, 13, 15, (17, 19, 21), 12), (12, 14, 16, (18, 20, 22), 11)):
+        outward = float(np.sign(lm[shoulder, 0] - lm[other, 0])) or 1.0
+        upper = np.linalg.norm(lm[elbow, :2] - lm[shoulder, :2])
+        fore = np.linalg.norm(lm[wrist, :2] - lm[elbow, :2])
+        u, f = np.radians(upper_deg), np.radians(fore_deg)
+        out[elbow, :2] = lm[shoulder, :2] + upper * np.array([outward * np.sin(u), np.cos(u)])
+        out[wrist, :2] = out[elbow, :2] + fore * np.array([outward * np.sin(f), np.cos(f)])
+        old_dir = lm[wrist, :2] - lm[elbow, :2]
+        new_dir = out[wrist, :2] - out[elbow, :2]
+        turn = np.arctan2(new_dir[1], new_dir[0]) - np.arctan2(old_dir[1], old_dir[0])
+        rot = np.array([[np.cos(turn), -np.sin(turn)], [np.sin(turn), np.cos(turn)]])
+        for i in hand:
+            out[i, :2] = out[wrist, :2] + rot @ (lm[i, :2] - lm[wrist, :2])
+    return out
+
+
+def limb_error(a: np.ndarray, b: np.ndarray) -> float:
+    ok = (a[list(LIMB_POINTS), 2] > 0.5) & (b[list(LIMB_POINTS), 2] > 0.5)
+    pts = np.array(LIMB_POINTS)[ok]
+    return float(np.mean(np.linalg.norm(a[pts, :2] - b[pts, :2], axis=1))) if len(pts) else 0.0
 
 
 def to_lab(rgb: np.ndarray) -> np.ndarray:
@@ -301,7 +455,8 @@ def draw_landmarks(rgb: np.ndarray, landmarks: np.ndarray, color, ids=ALIGN_POIN
     return out
 
 
-def comparison_sheet(body: Analysis, garment: Analysis, rgba, reason, change, report: Report) -> np.ndarray:
+def comparison_sheet(body: Analysis, garment: Analysis, rgba, reason, change, report: Report,
+                     before: np.ndarray | None = None, extra: list | None = None) -> np.ndarray:
     h, w = body.rgb.shape[:2]
     overlay_bgr = np.zeros((h, w, 3), np.uint8)
     for code, (_, bgr) in REASONS.items():
@@ -311,12 +466,15 @@ def comparison_sheet(body: Analysis, garment: Analysis, rgba, reason, change, re
 
     panels = [
         ("body figure", draw_landmarks(body.rgb, body.landmarks, (0, 255, 0))),
+        *([("garment, before repose", draw_landmarks(before, body.landmarks, (0, 255, 0), LIMB_POINTS))]
+          if before is not None else []),
         ("garment, aligned", draw_landmarks(draw_landmarks(garment.rgb, body.landmarks, (0, 255, 0)),
                                             garment.landmarks, (255, 0, 255))),
         ("colour change vs body", heat),
         ("why kept / removed", reasons_rgb),
         ("cut-out", composite(rgba, checkerboard(h, w))),
         ("cut-out on body figure", composite(rgba, body.rgb)),
+        *(extra or []),
     ]
     target_h = 900
     tiles = []
@@ -350,10 +508,29 @@ def process(models: Models, body: Analysis, garment_dir: Path, view: str, s: Set
 
     garment_raw = models.analyse(load_photo(find_photo(garment_dir, view), s))
     garment, valid = align(garment_raw, body, s, report)
+    report.limb_error_before_px = round(limb_error(garment.landmarks, body.landmarks), 1)
+    before = None
+    if s.repose:
+        before = garment.rgb
+        garment, valid = repose_analysis(garment, valid, body.landmarks, report)
+    report.limb_error_after_px = round(limb_error(garment.landmarks, body.landmarks), 1)
     rgba, reason, change = cut_out(garment, valid, body, s, report)
-
     Image.fromarray(rgba, "RGBA").save(out_dir / f"{view}_cutout.png")
-    sheet = comparison_sheet(body, garment, rgba, reason, change, report)
+
+    extra = []
+    if s.arms_down:
+        (body_rgb,), _, target, skipped = repose([body.rgb], body.landmarks, arms_down_pose(body.landmarks),
+                                                 body.person, [cv2.INTER_LINEAR])
+        for limb in skipped:
+            report.warnings.append(f"arms-down: {limb} turn too large, left as captured")
+        (cut_rgb, cut_alpha), ok, _, _ = repose([rgba[..., :3], rgba[..., 3]], body.landmarks, target,
+                                                body.person, [cv2.INTER_LINEAR, cv2.INTER_LINEAR])
+        rgba_down = np.dstack([cut_rgb, np.where(ok, cut_alpha, 0).astype(np.uint8)])
+        Image.fromarray(rgba_down, "RGBA").save(out_dir / f"{view}_cutout_arms_down.png")
+        extra = [("body figure, arms down", draw_landmarks(body_rgb, target, (0, 255, 0), range(11, 23))),
+                 ("cut-out, arms down", composite(rgba_down, body_rgb))]
+
+    sheet = comparison_sheet(body, garment, rgba, reason, change, report, before, extra)
     cv2.imwrite(str(out_dir / f"{view}_comparison.jpg"), sheet, [cv2.IMWRITE_JPEG_QUALITY, 88])
     report.seconds = round(time.time() - start, 2)
     (out_dir / f"{view}_report.json").write_text(json.dumps(asdict(report), indent=2))
@@ -363,10 +540,12 @@ def process(models: Models, body: Analysis, garment_dir: Path, view: str, s: Set
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--mirror", action="store_true", help="photos were taken in a mirror")
+    parser.add_argument("--no-repose", action="store_true", help="don't bend garment limbs onto the body figure")
+    parser.add_argument("--arms-down", action="store_true", help="also output a standard arms-down pose")
     parser.add_argument("--garment", help="only this garment folder")
     parser.add_argument("--view", choices=VIEWS, help="only this view")
     args = parser.parse_args()
-    s = Settings(mirror=args.mirror)
+    s = Settings(mirror=args.mirror, repose=not args.no_repose, arms_down=args.arms_down)
 
     models = Models()
     garment_dirs = sorted(p for p in (PHOTOS / "garments").iterdir() if p.is_dir())
@@ -386,7 +565,8 @@ def main() -> None:
                 print(f"FAIL {garment_dir.name}/{view}: {e}")
                 continue
             print(f"OK   {r.garment}/{r.view}: garment {r.garment_area_frac:.1%} of frame, "
-                  f"align error {r.align_error_px:.1f}px, {r.seconds}s")
+                  f"align error {r.align_error_px:.1f}px, limbs {r.limb_error_before_px}px -> "
+                  f"{r.limb_error_after_px}px, {r.seconds}s")
             for w in r.warnings:
                 print(f"     ! {w}")
 
