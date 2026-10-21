@@ -17,6 +17,9 @@ interface BodyFigureDao {
     @Insert
     suspend fun insert(figure: BodyFigureEntity): Long
 
+    @Query("SELECT * FROM body_figure ORDER BY createdAt DESC LIMIT 1")
+    suspend fun getCurrent(): BodyFigureEntity?
+
     /** The most recent body figure is the active one. */
     @Query("SELECT * FROM body_figure ORDER BY createdAt DESC LIMIT 1")
     fun observeCurrent(): Flow<BodyFigureEntity?>

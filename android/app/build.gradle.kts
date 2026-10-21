@@ -43,7 +43,7 @@ android {
     }
     androidResources {
         // Keep model files uncompressed so MediaPipe can read them straight from the APK.
-        noCompress += "task"
+        noCompress += listOf("task", "tflite")
     }
 }
 
@@ -82,6 +82,7 @@ dependencies {
     implementation(libs.camerax.view)
 
     implementation(libs.androidx.work.runtime)
+    implementation(libs.opencv)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
