@@ -3,7 +3,10 @@ package dev.wardrobe.app.ui.camera
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.net.Uri
+import android.os.SystemClock
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -19,27 +22,28 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
-import androidx.compose.material3.Switch
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.ui.draw.clip
-import androidx.hilt.navigation.compose.hiltViewModel
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import java.io.ByteArrayOutputStream
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -49,21 +53,26 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
-import android.media.AudioManager
-import android.media.ToneGenerator
-import android.os.SystemClock
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.wardrobe.app.capture.LivePoseAnalyzer
 import dev.wardrobe.app.domain.capture.AutoShutter
+import dev.wardrobe.app.domain.capture.CaptureMode
+import dev.wardrobe.app.domain.capture.CaptureSession
 import dev.wardrobe.app.domain.capture.PoseCheckResult
 import dev.wardrobe.app.domain.capture.PoseChecker
+import dev.wardrobe.app.domain.capture.parseHeightCm
 import dev.wardrobe.app.domain.capture.spoken
-import dev.wardrobe.app.domain.model.View
 import dev.wardrobe.app.domain.model.PoseFrame
+import dev.wardrobe.app.domain.model.View
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executors
 
 @Composable
@@ -102,6 +111,7 @@ fun CameraScreen() {
 private fun CameraControls(viewModel: CameraViewModel = hiltViewModel()) {
     val context = LocalContext.current
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val session = state.session
     val imageCapture = remember { buildImageCapture() }
     val imageAnalysis = remember { LivePoseAnalyzer.buildImageAnalysis() }
     val snackbar = remember { SnackbarHostState() }
@@ -119,23 +129,27 @@ private fun CameraControls(viewModel: CameraViewModel = hiltViewModel()) {
         }
     }
 
-    // Pose checks + auto-capture
     val checker = remember { PoseChecker() }
     val autoShutter = remember { AutoShutter() }
-    var wanted by remember { mutableStateOf(View.FRONT) }
-    var autoMode by remember { mutableStateOf(false) }
+    var autoMode by remember { mutableStateOf(true) }
     var check by remember { mutableStateOf<PoseCheckResult?>(null) }
+    var confirmFinish by remember { mutableStateOf(false) }
     val beeper = remember { ToneGenerator(AudioManager.STREAM_MUSIC, 90) }
     DisposableEffect(Unit) { onDispose { beeper.release() } }
 
-    LaunchedEffect(state.error) {
-        state.error?.let {
+    LaunchedEffect(state.message) {
+        state.message?.let {
             snackbar.showSnackbar(it)
-            viewModel.errorShown()
+            viewModel.messageShown()
         }
     }
+    // A longer tone when the 4th angle is done.
+    LaunchedEffect(session?.complete) {
+        if (session?.complete == true) beeper.startTone(ToneGenerator.TONE_PROP_ACK, 300)
+    }
 
-    fun takePhoto() {
+    fun takePhoto(view: View) {
+        val landmarks = pose?.landmarks.orEmpty()
         viewModel.onCaptureStarted()
         // Write into memory first so CameraX includes the EXIF rotation; the ViewModel then saves it.
         val buffer = ByteArrayOutputStream()
@@ -144,7 +158,7 @@ private fun CameraControls(viewModel: CameraViewModel = hiltViewModel()) {
             ContextCompat.getMainExecutor(context),
             object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(output: ImageCapture.OutputFileResults) =
-                    viewModel.savePhoto(buffer.toByteArray())
+                    viewModel.savePhoto(buffer.toByteArray(), view, landmarks)
 
                 override fun onError(e: ImageCaptureException) =
                     viewModel.onCaptureFailed("Capture failed: ${e.message}")
@@ -154,14 +168,13 @@ private fun CameraControls(viewModel: CameraViewModel = hiltViewModel()) {
 
     LaunchedEffect(pose) {
         val frame = pose ?: return@LaunchedEffect
+        val wanted = session?.wanted ?: View.FRONT
         val result = checker.check(frame, wanted, SystemClock.uptimeMillis())
         check = result
-        if (autoMode && !state.capturing && autoShutter.update(result.ready, SystemClock.uptimeMillis())) {
+        val shoot = session?.wanted != null && autoMode && !state.capturing && !state.askHeight
+        if (autoShutter.update(shoot && result.ready, SystemClock.uptimeMillis())) {
             beeper.startTone(ToneGenerator.TONE_PROP_BEEP, 150)
-            takePhoto()
-            // Next angle: front -> right -> back -> left, then stop.
-            val next = View.entries.getOrNull(wanted.ordinal + 1)
-            if (next != null) wanted = next else autoMode = false
+            takePhoto(wanted)
         }
     }
 
@@ -172,34 +185,103 @@ private fun CameraControls(viewModel: CameraViewModel = hiltViewModel()) {
             color = if (check?.ready == true) Color(0xFF4CFF7A) else Color(0xFFFFB74D),
         )
         PoseReadout(pose, check, Modifier.align(Alignment.TopStart).padding(16.dp))
-        HintBanner(wanted, check, autoMode, Modifier.align(Alignment.TopCenter).padding(top = 16.dp))
+        TrayBadge(state.trayCount, Modifier.align(Alignment.TopEnd).padding(16.dp))
 
-        CaptureSettings(
-            wanted = wanted,
-            onWanted = { wanted = it },
-            autoMode = autoMode,
-            onAutoMode = { autoMode = it },
-            modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
-        )
-
-        state.lastShot?.let { shot ->
-            LastShotCard(shot, state.shotsSaved, Modifier.align(Alignment.BottomStart).padding(16.dp))
+        if (session == null) {
+            StartPanel(
+                hasBodyFigure = state.hasBodyFigure,
+                onBodyFigure = { autoMode = true; viewModel.startBodyFigure() },
+                onStartSession = { autoMode = true; viewModel.startSession() },
+                modifier = Modifier.align(Alignment.Center),
+            )
+        } else {
+            HintBanner(session, check, autoMode, Modifier.align(Alignment.TopCenter).padding(top = 64.dp))
+            SessionPanel(
+                session = session,
+                saved = state.currentSaved,
+                autoMode = autoMode,
+                onAutoMode = { autoMode = it },
+                onChoose = viewModel::choose,
+                onNextGarment = viewModel::nextGarment,
+                onFinish = {
+                    if (session.mode == CaptureMode.GARMENT && session.started && !session.complete) confirmFinish = true
+                    else viewModel.finish()
+                },
+                modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+            )
+            session.wanted?.let { wanted ->
+                ShutterButton(
+                    busy = state.capturing,
+                    onClick = { takePhoto(wanted) },
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 24.dp),
+                )
+            }
         }
 
-        ShutterButton(
-            busy = state.capturing,
-            onClick = ::takePhoto,
-            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 24.dp),
-        )
+        state.lastShot?.let { shot ->
+            LastShotCard(shot, Modifier.align(Alignment.BottomStart).padding(16.dp))
+        }
 
-        SnackbarHost(snackbar, Modifier.align(Alignment.TopCenter))
+        SnackbarHost(snackbar, Modifier.align(Alignment.Center))
+    }
+
+    if (state.askHeight) {
+        HeightDialog(onSave = viewModel::saveBodyFigure, onCancel = viewModel::finish)
+    }
+    if (confirmFinish) {
+        AlertDialog(
+            onDismissRequest = { confirmFinish = false },
+            title = { Text("Finish session?") },
+            text = {
+                Text("Garment ${session?.garmentNumber} has only ${session?.shots?.size} of 4 angles. Its photos will be deleted.")
+            },
+            confirmButton = { TextButton(onClick = { confirmFinish = false; viewModel.finish() }) { Text("Discard and finish") } },
+            dismissButton = { TextButton(onClick = { confirmFinish = false }) { Text("Keep capturing") } },
+        )
     }
 }
 
 @Composable
-private fun HintBanner(wanted: View, check: PoseCheckResult?, autoMode: Boolean, modifier: Modifier = Modifier) {
-    val ready = check?.ready == true
+private fun StartPanel(
+    hasBodyFigure: Boolean,
+    onBodyFigure: () -> Unit,
+    onStartSession: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(modifier = modifier, shape = RoundedCornerShape(16.dp), color = Color.Black.copy(alpha = 0.7f)) {
+        Column(Modifier.padding(24.dp).width(360.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            if (hasBodyFigure) {
+                Button(onClick = onStartSession, Modifier.fillMaxWidth()) { Text("Start session") }
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "One garment at a time over the base outfit, 4 angles each.",
+                    color = Color.White.copy(alpha = 0.8f), style = MaterialTheme.typography.bodySmall,
+                    textAlign = TextAlign.Center,
+                )
+                Spacer(Modifier.height(16.dp))
+                OutlinedButton(onClick = onBodyFigure, Modifier.fillMaxWidth()) { Text("Redo body figure", color = Color.White) }
+            } else {
+                Text("First, set up your body figure", color = Color.White, style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Wear only the base outfit. The app takes front, right, back and left, then asks your height.",
+                    color = Color.White.copy(alpha = 0.8f), style = MaterialTheme.typography.bodySmall,
+                    textAlign = TextAlign.Center,
+                )
+                Spacer(Modifier.height(16.dp))
+                Button(onClick = onBodyFigure, Modifier.fillMaxWidth()) { Text("Set up body figure") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun HintBanner(session: CaptureSession, check: PoseCheckResult?, autoMode: Boolean, modifier: Modifier = Modifier) {
+    val wanted = session.wanted
+    val ready = wanted != null && check?.ready == true
     val text = when {
+        wanted == null && session.mode == CaptureMode.BODY_FIGURE -> "All 4 angles done"
+        wanted == null -> "Garment ${session.garmentNumber} done ✓ Change garment, then tap Next garment"
         check == null -> "Starting…"
         ready -> "${wanted.spoken().replaceFirstChar { it.uppercase() }} ✓ Ready" + if (autoMode) " · capturing" else ""
         else -> check.issues.first().message
@@ -207,29 +289,41 @@ private fun HintBanner(wanted: View, check: PoseCheckResult?, autoMode: Boolean,
     Surface(
         modifier = modifier,
         shape = RoundedCornerShape(24.dp),
-        color = if (ready) Color(0xFF1B5E20).copy(alpha = 0.85f) else Color.Black.copy(alpha = 0.7f),
+        color = if (ready || wanted == null) Color(0xFF1B5E20).copy(alpha = 0.85f) else Color.Black.copy(alpha = 0.7f),
     ) {
-        Text(text, Modifier.padding(horizontal = 24.dp, vertical = 12.dp), color = Color.White,
-            style = MaterialTheme.typography.headlineSmall)
+        Text(
+            text, Modifier.padding(horizontal = 24.dp, vertical = 12.dp), color = Color.White,
+            style = MaterialTheme.typography.headlineSmall,
+        )
     }
 }
 
 @Composable
-private fun CaptureSettings(
-    wanted: View,
-    onWanted: (View) -> Unit,
+private fun SessionPanel(
+    session: CaptureSession,
+    saved: Boolean,
     autoMode: Boolean,
     onAutoMode: (Boolean) -> Unit,
+    onChoose: (View) -> Unit,
+    onNextGarment: () -> Unit,
+    onFinish: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Surface(modifier = modifier, shape = RoundedCornerShape(12.dp), color = Color.Black.copy(alpha = 0.6f)) {
+    Surface(modifier = modifier, shape = RoundedCornerShape(12.dp), color = Color.Black.copy(alpha = 0.7f)) {
         Column(Modifier.padding(12.dp), horizontalAlignment = Alignment.End) {
+            val title = when (session.mode) {
+                CaptureMode.BODY_FIGURE -> "Body figure"
+                CaptureMode.GARMENT -> "Garment ${session.garmentNumber}" + if (saved) " · in review tray" else ""
+            }
+            Text(title, color = Color.White, style = MaterialTheme.typography.titleMedium)
+            Text("Tap a ✓ angle to retake it", color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.bodySmall)
             Row {
                 View.entries.forEach { view ->
+                    val label = view.spoken().substringBefore(" ").replaceFirstChar { it.uppercase() }
                     FilterChip(
-                        selected = view == wanted,
-                        onClick = { onWanted(view) },
-                        label = { Text(view.spoken().substringBefore(" ").replaceFirstChar { it.uppercase() }) },
+                        selected = view == session.wanted,
+                        onClick = { onChoose(view) },
+                        label = { Text(if (view in session.shots) "✓ $label" else label) },
                         modifier = Modifier.padding(start = 6.dp),
                         colors = FilterChipDefaults.filterChipColors(labelColor = Color.White),
                     )
@@ -240,8 +334,57 @@ private fun CaptureSettings(
                 Spacer(Modifier.width(8.dp))
                 Switch(checked = autoMode, onCheckedChange = onAutoMode)
             }
+            Row {
+                if (session.mode == CaptureMode.GARMENT) {
+                    OutlinedButton(onClick = onFinish) { Text("Finish", color = Color.White) }
+                    Spacer(Modifier.width(8.dp))
+                    Button(onClick = onNextGarment, enabled = session.complete) { Text("Next garment") }
+                } else {
+                    OutlinedButton(onClick = onFinish) { Text("Cancel setup", color = Color.White) }
+                }
+            }
         }
     }
+}
+
+@Composable
+private fun TrayBadge(count: Int, modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier, shape = RoundedCornerShape(16.dp),
+        color = if (count > 0) MaterialTheme.colorScheme.primary else Color.Black.copy(alpha = 0.6f),
+    ) {
+        Text(
+            "Review tray: $count", Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+            color = if (count > 0) MaterialTheme.colorScheme.onPrimary else Color.White,
+            style = MaterialTheme.typography.labelLarge,
+        )
+    }
+}
+
+@Composable
+private fun HeightDialog(onSave: (Float) -> Unit, onCancel: () -> Unit) {
+    var text by remember { mutableStateOf("") }
+    val height = parseHeightCm(text)
+    AlertDialog(
+        onDismissRequest = {},
+        title = { Text("Your height") },
+        text = {
+            Column {
+                Text("Used to measure garment lengths. Centimetres, e.g. 175.")
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    label = { Text("Height (cm)") },
+                    singleLine = true,
+                    isError = text.isNotBlank() && height == null,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = { height?.let(onSave) }, enabled = height != null) { Text("Save body figure") } },
+        dismissButton = { TextButton(onClick = onCancel) { Text("Discard") } },
+    )
 }
 
 @Composable
@@ -249,15 +392,13 @@ private fun PoseReadout(pose: PoseFrame?, check: PoseCheckResult?, modifier: Mod
     val text = when {
         pose == null -> "Pose: starting…"
         pose.landmarks.isEmpty() -> "Pose: nobody in view · ${pose.inferenceMs} ms"
-        else -> "Pose: ${pose.inferenceMs} ms · seen ${check?.seenView?.spoken() ?: "?"} · " +
-            "shoulders/torso %.2f · face %.2f · L-shoulder on image %s".format(
-                check?.shoulderRatio ?: 0f, check?.faceVisibility ?: 0f,
-                if (check?.leftShoulderOnImageRight == true) "right" else "left",
-            )
+        else -> "Pose: ${pose.inferenceMs} ms · seen ${check?.seenView?.spoken() ?: "?"}"
     }
     Surface(modifier = modifier, shape = RoundedCornerShape(8.dp), color = Color.Black.copy(alpha = 0.6f)) {
-        Text(text, Modifier.padding(horizontal = 10.dp, vertical = 6.dp), color = Color.White,
-            style = MaterialTheme.typography.bodySmall)
+        Text(
+            text, Modifier.padding(horizontal = 10.dp, vertical = 6.dp), color = Color.White,
+            style = MaterialTheme.typography.bodySmall,
+        )
     }
 }
 
@@ -278,7 +419,7 @@ private fun ShutterButton(busy: Boolean, onClick: () -> Unit, modifier: Modifier
 }
 
 @Composable
-private fun LastShotCard(shot: CameraViewModel.LastShot, saved: Int, modifier: Modifier = Modifier) {
+private fun LastShotCard(shot: CameraViewModel.LastShot, modifier: Modifier = Modifier) {
     Surface(modifier = modifier, shape = RoundedCornerShape(12.dp), color = Color.Black.copy(alpha = 0.6f)) {
         Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
             Image(
@@ -288,10 +429,12 @@ private fun LastShotCard(shot: CameraViewModel.LastShot, saved: Int, modifier: M
             )
             Spacer(Modifier.width(12.dp))
             Column {
-                Text("${shot.width} × ${shot.height}", color = Color.White, style = MaterialTheme.typography.titleSmall)
                 Text(
-                    "%.1f MP · %d saved".format(shot.width * shot.height / 1e6, saved),
-                    color = Color.White.copy(alpha = 0.8f),
+                    shot.view.spoken().replaceFirstChar { it.uppercase() }, color = Color.White,
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                Text(
+                    "${shot.width} × ${shot.height}", color = Color.White.copy(alpha = 0.8f),
                     style = MaterialTheme.typography.bodySmall,
                 )
             }

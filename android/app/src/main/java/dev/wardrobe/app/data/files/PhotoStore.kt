@@ -12,21 +12,20 @@ import java.nio.file.StandardCopyOption
  * paths returned here, so the folder can be moved or backed up as a whole.
  *
  * Layout:
- *   body/<figureId>/<view>.jpg                  body figure photos
- *   captures/<sessionId>/<entryId>/<view>.jpg   raw captures (+ closeup.jpg)
- *   captures/manual/<takenAt>.jpg               manual shutter shots
+ *   body/<figureKey>/<view>.jpg                 body figure photos
+ *   captures/<sessionId>/<garment>/<view>.jpg   raw captures, garment = 1, 2, … within the session (+ closeup.jpg)
  *   cutouts/<entryId>/<view>.png                batch-processing output awaiting review
  *   items/<itemId>/<versionId>/<view>.png       approved wardrobe images
  */
 class PhotoStore(private val root: File) {
 
-    fun bodyPath(figureId: Long, view: View) = "body/$figureId/${view.key}.jpg"
-    fun rawCapturePath(sessionId: String, entryId: Long, view: View) = "captures/$sessionId/$entryId/${view.key}.jpg"
-    fun closeUpPath(sessionId: String, entryId: Long) = "captures/$sessionId/$entryId/closeup.jpg"
+    fun bodyPath(figureKey: String, view: View) = "body/$figureKey/${view.key}.jpg"
+    fun rawCapturePath(sessionId: String, garment: Int, view: View) = "captures/$sessionId/$garment/${view.key}.jpg"
+    fun closeUpPath(sessionId: String, garment: Int) = "captures/$sessionId/$garment/closeup.jpg"
+    fun captureDir(sessionId: String, garment: Int) = "captures/$sessionId/$garment"
     fun cutoutPath(entryId: Long, view: View) = "cutouts/$entryId/${view.key}.png"
     fun itemPath(itemId: Long, versionId: Long, view: View) = "items/$itemId/$versionId/${view.key}.png"
     /** Manual shutter shots outside a session (Phase 1 testing). */
-    fun manualShotPath(takenAt: Long) = "captures/manual/$takenAt.jpg"
 
     /** Absolute file for a stored relative path. Rejects paths that would escape [root]. */
     fun file(relativePath: String): File {
