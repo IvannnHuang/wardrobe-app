@@ -55,6 +55,7 @@ venv/
 prototype/output/
 prototype/models/*.task
 prototype/models/*.tflite
+prototype/models/*.onnx
 
 # Clear notebook outputs before committing (they can embed photos).
 # Tip: pip install nbstripout && nbstripout --install

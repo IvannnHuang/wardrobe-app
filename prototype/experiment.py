@@ -41,6 +41,9 @@ MODELS = {
     "b3": "sayeed99/segformer_b3_clothes",
 }
 
+# Pinned so the exported tablet model is reproducible.
+REVISIONS = {"b2": "584abc1e1d260e23c0fc627c5217a09b2b461046"}
+
 # Clothes-model labels grouped into garment pieces. Which base colour each piece is checked against.
 PIECES = {
     "hat": ([1], None),
@@ -78,7 +81,7 @@ class Result:
 
 class Parser:
     def __init__(self, name: str):
-        self.model = SegformerForSemanticSegmentation.from_pretrained(MODELS[name]).eval()
+        self.model = SegformerForSemanticSegmentation.from_pretrained(MODELS[name], revision=REVISIONS.get(name)).eval()
         self.params_m = sum(p.numel() for p in self.model.parameters()) / 1e6
 
     @torch.no_grad()

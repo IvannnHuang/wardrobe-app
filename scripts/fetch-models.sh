@@ -16,6 +16,12 @@ MODELS=(
   "selfie_multiclass_256x256.tflite|https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite|c6748b1253a99067ef71f7e26ca71096cd449baefa8f101900ea23016507e0e0|yes"
 )
 
+# The clothes model is exported from PyTorch (pinned revision), not downloaded as-is:
+#   cd prototype && .venv/Scripts/python export_clothes_model.py
+if [ ! -f "$ANDROID_DIR/clothes_segformer_b2_fp16.onnx" ]; then
+  echo "NOTE: clothes_segformer_b2_fp16.onnx missing - run prototype/export_clothes_model.py"
+fi
+
 for entry in "${MODELS[@]}"; do
   IFS='|' read -r name url sha android <<< "$entry"
   target="$PROTO_DIR/$name"

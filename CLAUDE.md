@@ -5,7 +5,7 @@ Guidance for Claude Code working in this repo. Read this before every task.
 ## What this project is
 
 A personal Android tablet app that:
-1. Captures my clothes **one garment at a time** (4 angles: front, right, back, left) with the tablet's rear camera on a tripod.
+1. Captures my clothes worn over a base outfit, **one layer at a time** (4 angles: front, right, back, left) with the tablet's rear camera on a tripod. Pieces that don't overlap (e.g. pants + shoes + hat) can share a round.
 2. Processes captures **in a background batch after the session**: cut-out → tagging → matching.
 3. Lets me **review and verify** every item before it enters the wardrobe.
 4. Lets me build **layered outfits on my own body figure** by swiping.
@@ -29,7 +29,8 @@ Single user (me), single device. Draft 1 = everything below. Draft 2 = auto-pair
 - Device: **Samsung Galaxy Tab S7+** (SM-T970, Snapdragon 865+, 13MP rear AF + 5MP ultra-wide, 8MP front). minSdk 29 (shipped Android 10); currently runs Android 13 — test on that.
 - Use the **13MP rear main camera**, portrait, tripod at about chest height, fixed position.
 - Fixed LED lighting, plain light wall, tape floor mark.
-- **Base outfit**: fitted, one solid color I don't own clothes in (e.g. muted teal). Every garment is captured over it.
+- **Base outfit**: fitted, one solid color I don't own clothes in (e.g. muted teal). Every garment is captured over it; the cut-out removes it by colour, so the colour must be distinct. Wear no shoes/hat in the body figure (or ones I never capture).
+- Tripod, fixed light and floor mark improve results but are no longer strictly required (the cut-out doesn't compare pixel positions).
 - Optional: my phone as remote (browser page served by the tablet), Bluetooth shutter (volume-key events).
 - Do not use the emulator for camera or ML work; test on the real tablet.
 
@@ -48,7 +49,7 @@ wardrobe-app/
 
 - **Android:** Kotlin, Jetpack Compose, Material 3, single-activity + Navigation Compose
 - **Camera:** CameraX (lock AE/AWB per session via Camera2 interop; AF stays continuous so close-ups can refocus)
-- **ML (bundled):** MediaPipe Tasks: Pose Landmarker, Image Segmenter (person mask). Mobile CLIP-type image model in TFLite for semantic tags.
+- **ML (bundled):** MediaPipe Tasks: Pose Landmarker, Image Segmenter (person mask). Clothes segmentation: SegFormer-B2 fine-tuned on ATR (`mattmdjaga/segformer_b2_clothes`, 18 labels) via ONNX Runtime; NVIDIA SegFormer licence = non-commercial only (fine for this personal app). Mobile CLIP-type image model for semantic tags.
 - **Image processing:** OpenCV for Android (or plain Kotlin/RenderScript replacement where simpler)
 - **Storage:** Room (SQLite) + files in `filesDir`
 - **Background work:** WorkManager (batch processing, resumable)
@@ -84,11 +85,13 @@ Raw photos are written to disk before anything else so nothing is lost.
 ## Batch processing (after the session)
 
 Per garment, resumable WorkManager job:
-1. **Align** capture to body figure using pose landmarks.
-2. **Cut-out:** person mask → remove background, base-outfit color, and body (diff vs. body figure) → edge cleanup. Open garments get transparent interiors.
-3. **Tagging** (below), each tag with a confidence score.
-4. **Matching:** suggest "new item" or "version of existing item".
-5. Status → `READY_FOR_REVIEW`; notify "N items ready to review".
+1. **Segment** each photo with the clothes model → pieces (top, dress, bottom, shoes, hat, bag, belt, scarf).
+2. **Remove the base outfit by colour:** base-top colours (learned from the body figure) are removed from tops, base-bottom colours from bottoms; a piece that is mostly base colour is the base garment and is dropped, as are shoes/hats already worn on the body figure. Open garments get transparent interiors. Edge cleanup.
+3. **Align** each piece onto the body figure using pose landmarks (similarity transform).
+   Method chosen by `prototype/experiment.py` (2026-10-21): it beat the older "diff vs body figure" method, which broke whenever the tablet or light moved.
+4. **Tagging** (below), each tag with a confidence score.
+5. **Matching:** suggest "new item" or "version of existing item".
+6. Status → `READY_FOR_REVIEW`; notify "N items ready to review".
 
 ## Review screen
 

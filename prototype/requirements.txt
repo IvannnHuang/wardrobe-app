@@ -10,3 +10,6 @@ nbstripout>=0.7        # strips notebook outputs before commits
 # experiment.py only (clothes segmentation models; install torch CPU from https://download.pytorch.org/whl/cpu)
 torch>=2.5
 transformers>=4.45
+onnx>=1.17
+onnxruntime>=1.20
+onnxconverter-common>=1.14
