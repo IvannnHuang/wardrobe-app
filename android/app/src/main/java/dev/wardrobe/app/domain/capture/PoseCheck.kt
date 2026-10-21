@@ -42,7 +42,13 @@ fun View.spoken(): String = when (this) {
     View.LEFT -> "left side"
 }
 
-data class PoseCheckResult(val issues: List<PoseIssue>, val seenView: View?, val shoulderRatio: Float) {
+data class PoseCheckResult(
+    val issues: List<PoseIssue>,
+    val seenView: View?,
+    val shoulderRatio: Float,
+    val faceVisibility: Float = 0f,
+    val leftShoulderOnImageRight: Boolean = false,
+) {
     val ready get() = issues.isEmpty()
 }
 
@@ -75,9 +81,16 @@ fun detectView(lm: List<Landmark>): Pair<View?, Float> {
     val torso = abs((lm[PoseIds.LEFT_HIP].y + lm[PoseIds.RIGHT_HIP].y) / 2 - (ls.y + rs.y) / 2)
     if (torso < 1e-3f) return null to 0f
     val ratio = abs(ls.x - rs.x) / torso
-    val faceVisible = listOf(0, 2, 5).map { lm[it].visibility }.average() > 0.6
+    // Facing the camera, my left shoulder is on the image's right; from behind it's on the left.
+    // The model often still reports a "visible" face from behind, so the face only breaks ties
+    // when the shoulders are nearly level in x.
+    val leftOnRight = ls.x > rs.x
+    val face = faceVisibility(lm)
     val view = when {
-        ratio >= FRONT_MIN_RATIO -> if (faceVisible && ls.x > rs.x) View.FRONT else if (!faceVisible) View.BACK else null
+        ratio >= FRONT_MIN_RATIO -> when {
+            abs(ls.x - rs.x) > 0.02f -> if (leftOnRight) View.FRONT else View.BACK
+            else -> if (face > 0.6f) View.FRONT else View.BACK
+        }
         ratio <= SIDE_MAX_RATIO -> {
             // In profile the nose sticks out past the ears in the direction I'm facing.
             val facing = lm[PoseIds.NOSE].x - (lm[7].x + lm[8].x) / 2
@@ -91,6 +104,8 @@ fun detectView(lm: List<Landmark>): Pair<View?, Float> {
     }
     return view to ratio
 }
+
+fun faceVisibility(lm: List<Landmark>): Float = listOf(0, 2, 5).map { lm[it].visibility }.average().toFloat()
 
 /** "Still" = key joints moved less than [maxMove] (normalised) over the last [windowMs]. */
 class StillnessTracker(private val windowMs: Long = 600, private val maxMove: Float = 0.012f) {
@@ -156,7 +171,10 @@ class PoseChecker(var target: CaptureTarget = CaptureTarget()) {
         // 4. Still
         if (!stillness.update(lm, nowMs)) issues += PoseIssue.Moving
 
-        return PoseCheckResult(issues, seen, ratio)
+        return PoseCheckResult(
+            issues, seen, ratio, faceVisibility(lm),
+            lm[PoseIds.LEFT_SHOULDER].x > lm[PoseIds.RIGHT_SHOULDER].x,
+        )
     }
 
     /** Turns "move toward the image's right/left" into words relative to me for the wanted view. */

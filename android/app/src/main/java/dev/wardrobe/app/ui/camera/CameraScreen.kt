@@ -250,7 +250,10 @@ private fun PoseReadout(pose: PoseFrame?, check: PoseCheckResult?, modifier: Mod
         pose == null -> "Pose: starting…"
         pose.landmarks.isEmpty() -> "Pose: nobody in view · ${pose.inferenceMs} ms"
         else -> "Pose: ${pose.inferenceMs} ms · seen ${check?.seenView?.spoken() ?: "?"} · " +
-            "shoulders/torso %.2f".format(check?.shoulderRatio ?: 0f)
+            "shoulders/torso %.2f · face %.2f · L-shoulder on image %s".format(
+                check?.shoulderRatio ?: 0f, check?.faceVisibility ?: 0f,
+                if (check?.leftShoulderOnImageRight == true) "right" else "left",
+            )
     }
     Surface(modifier = modifier, shape = RoundedCornerShape(8.dp), color = Color.Black.copy(alpha = 0.6f)) {
         Text(text, Modifier.padding(horizontal = 10.dp, vertical = 6.dp), color = Color.White,

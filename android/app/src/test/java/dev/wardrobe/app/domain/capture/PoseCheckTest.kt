@@ -81,6 +81,15 @@ class PoseCheckTest {
     }
 
     @Test
+    fun backViewIsReadyEvenWhenTheModelGuessesAVisibleFace() {
+        // From behind: shoulders swapped in the image, but face visibility stays high (seen on the tablet).
+        val lm = standingFront().apply { val l = this[11]; this[11] = this[12].copy(); this[12] = l }
+        val result = hold(PoseChecker(), lm, View.BACK)
+        assertEquals(View.BACK, result.seenView)
+        assertEquals(emptyList<PoseIssue>(), result.issues)
+    }
+
+    @Test
     fun rightSideIsRecognisedFromNoseDirection() {
         // Showing my right side: shoulders overlap, nose points to the image's right.
         val lm = standingFront().apply {
