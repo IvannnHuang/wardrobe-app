@@ -9,6 +9,8 @@ import dev.wardrobe.app.data.db.BodyFigureEntity
 import dev.wardrobe.app.data.db.CaptureEntryEntity
 import dev.wardrobe.app.data.files.PhotoStore
 import dev.wardrobe.app.domain.cutout.PieceType
+import dev.wardrobe.app.domain.cutout.VoteResult
+import dev.wardrobe.app.domain.cutout.voteAcrossViews
 import dev.wardrobe.app.domain.cutout.learnBase
 import dev.wardrobe.app.domain.model.View
 import dev.wardrobe.app.domain.tags.Measured
@@ -28,7 +30,8 @@ import javax.inject.Singleton
  * (cutouts/<entryId>/<piece>/<view>.png), and measure tags per piece.
  *
  * cutoutPathsJson: {"pieces": {"top": {"front": {path, alignPoints, alignErrorPx, areaFrac, warnings}, ...}},
- *                   "views": {"front": {"notes": [...], "ms": 1234} | {"error": "..."}}}
+ *                   "views": {"front": {"notes": [...], "ms": 1234} | {"error": "..."}},
+ *                   "rejected": {"bottom": "BASE_OUTFIT", ...}}   (pieces dropped by the vote across views)
  * suggestedTagsJson: {"top": {"colour": {...}, "sleeve": {...}, ...}, "bottom": {...}}
  */
 @Singleton
@@ -48,11 +51,15 @@ class CaptureProcessor @Inject constructor(
         val tags = mutableMapOf<PieceType, JSONObject>()
         val mainFromFront = mutableSetOf<PieceType>()
         val sideThickness = mutableMapOf<PieceType, MutableList<Measured<Int>>>()
+        val keptViews = mutableMapOf<PieceType, Int>()
+        val droppedViews = mutableMapOf<PieceType, Int>()
+        var viewsProcessed = 0
 
         // Body figure model results are cached per body figure and view (they're the same for every garment).
         val cacheDir = java.io.File(context.noBackupFilesDir, "body-cache")
         cacheDir.listFiles { f -> !f.name.startsWith("${body.id}-") }?.forEach { it.delete() }
 
+        photoStore.deleteDir("cutouts/${entry.id}") // results of an earlier run
         GarmentCutout(context).use { cutout ->
             // Front first, so its measurements are preferred for the main tags.
             for (view in View.entries) {
@@ -65,7 +72,10 @@ class CaptureProcessor @Inject constructor(
                     g = cutout.analyse(photoStore.file(rawPath))
                     val tPieces = System.currentTimeMillis()
                     val base = learnBase(b.lab, b.labels)
-                    val (found, notes) = cutout.pieces(g, b, base)
+                    val (found, dropped) = cutout.pieces(g, b, base)
+                    viewsProcessed++
+                    found.forEach { keptViews.merge(it.type, 1, Int::plus) }
+                    dropped.forEach { droppedViews.merge(it.type, 1, Int::plus) }
                     val tTags = System.currentTimeMillis()
                     for (p in found) {
                         val png = ByteArrayOutputStream().also { p.rgbaInBody.compress(Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()
@@ -88,7 +98,7 @@ class CaptureProcessor @Inject constructor(
                     }
                     val done = System.currentTimeMillis()
                     Log.i(TAG, "entry ${entry.id} ${view.key}: analyse ${tPieces - started} ms, pieces ${tTags - tPieces} ms, save+tags ${done - tTags} ms")
-                    views.put(view.key, JSONObject().put("notes", JSONArray(notes)).put("ms", done - started))
+                    views.put(view.key, JSONObject().put("notes", JSONArray(dropped.map { it.message })).put("ms", done - started))
                 } catch (e: IllegalStateException) {
                     // One bad angle (e.g. nobody detected) shouldn't sink the garment; the review shows the error.
                     Log.w(TAG, "entry ${entry.id} ${view.key}: ${e.message}")
@@ -99,12 +109,21 @@ class CaptureProcessor @Inject constructor(
                 }
             }
         }
+        // The views vote: drop pieces that are really the base outfit, or seen in only one view.
+        val rejected = JSONObject()
+        for ((type, result) in voteAcrossViews(keptViews, droppedViews, viewsProcessed)) {
+            if (result == VoteResult.KEEP) continue
+            rejected.put(type.key, result.name)
+            pieces.remove(type.key)
+            tags.remove(type)
+            photoStore.deleteDir("cutouts/${entry.id}/${type.key}")
+        }
         val suggested = JSONObject()
         for ((type, t) in tags) {
             PieceTagger.addThickness(t, sideThickness[type].orEmpty())
             suggested.put(type.key, t)
         }
-        Output(JSONObject().put("pieces", pieces).put("views", views).toString(), suggested.toString())
+        Output(JSONObject().put("pieces", pieces).put("views", views).put("rejected", rejected).toString(), suggested.toString())
     }
 
     private fun BodyFigureEntity.path(view: View) = when (view) {

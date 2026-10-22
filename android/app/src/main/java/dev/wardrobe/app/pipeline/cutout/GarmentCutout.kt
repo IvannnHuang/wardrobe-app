@@ -12,6 +12,7 @@ import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker
 import dev.wardrobe.app.domain.cutout.BaseOutfit
 import dev.wardrobe.app.domain.cutout.CutoutSettings
+import dev.wardrobe.app.domain.cutout.DroppedPiece
 import dev.wardrobe.app.domain.cutout.PieceSettings
 import dev.wardrobe.app.domain.cutout.PieceType
 import dev.wardrobe.app.domain.cutout.alignPointsFor
@@ -180,7 +181,7 @@ class GarmentCutout(
     }
 
     /** Finds the garment pieces in [garment], using the base outfit learned from the body figure. */
-    fun pieces(garment: PhotoAnalysis, body: PhotoAnalysis, base: BaseOutfit): Pair<List<PieceResult>, List<String>> {
+    fun pieces(garment: PhotoAnalysis, body: PhotoAnalysis, base: BaseOutfit): Pair<List<PieceResult>, List<DroppedPiece>> {
         val (raw, notes) = extractPieces(garment.lab, garment.labels, base, pieceSettings)
         val n = garment.width * garment.height
         val results = raw.mapNotNull { piece ->

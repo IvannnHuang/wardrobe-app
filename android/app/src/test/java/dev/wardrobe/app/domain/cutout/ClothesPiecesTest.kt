@@ -43,7 +43,7 @@ class ClothesPiecesTest {
         assertEquals(250, top.keep.count { it })        // opening removed
         assertEquals(300, top.region.count { it })
         assertEquals(50f / 300, top.baseFrac, 1e-4f)
-        assertTrue(notes.single().startsWith("bottom: base outfit"))
+        assertTrue(notes.single().message.startsWith("bottom: base outfit"))
     }
 
     @Test
@@ -58,7 +58,7 @@ class ClothesPiecesTest {
         )
         val (pieces, notes) = extractPieces(lab, labels, withShoes)
         assertEquals(listOf(PieceType.TOP), pieces.map { it.type })
-        assertEquals(listOf("shoes: already worn on body figure"), notes)
+        assertEquals(listOf("shoes: already worn on body figure"), notes.map { it.message })
     }
 
     @Test
@@ -79,7 +79,7 @@ class ClothesPiecesTest {
         val settings = PieceSettings(minSkinPixels = 100)
         val (pieces, notes) = extractPieces(lab, labels, bodyWithSkin, settings)
         assertEquals(listOf(PieceType.TOP), pieces.map { it.type })
-        assertTrue(notes.single().startsWith("bottom: base outfit"))
+        assertTrue(notes.single().message.startsWith("bottom: base outfit"))
         // Without the skin reference the dimmed pants would no longer match the base colour.
         val noSkin = extractPieces(lab, labels, bodyWithSkin.copy(skin = null), settings).first
         assertTrue(noSkin.any { it.type == PieceType.BOTTOM })

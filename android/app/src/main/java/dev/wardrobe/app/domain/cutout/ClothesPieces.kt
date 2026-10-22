@@ -98,19 +98,30 @@ fun learnBase(lab: FloatArray, labels: ByteArray, s: PieceSettings = PieceSettin
     return BaseOutfit(palettes, worn, skin)
 }
 
+/** A piece the model found but that isn't a new garment. */
+data class DroppedPiece(val type: PieceType, val reason: Reason, val baseFrac: Float = 0f) {
+    enum class Reason { BASE_OUTFIT, ALREADY_WORN }
+
+    val message
+        get() = when (reason) {
+            Reason.BASE_OUTFIT -> "${type.key}: base outfit (${(baseFrac * 100).toInt()}% base colour)"
+            Reason.ALREADY_WORN -> "${type.key}: already worn on body figure"
+        }
+}
+
 /** A garment piece before edge cleanup: pixels to keep, the model's region, and its base-colour share. */
 class RawPiece(val type: PieceType, val keep: BooleanArray, val region: BooleanArray, val baseFrac: Float)
 
-/** Splits a garment photo into pieces and removes the base outfit. Returns pieces + notes for the report. */
+/** Splits a garment photo into pieces and removes the base outfit. Returns new pieces + dropped ones. */
 fun extractPieces(
     lab: FloatArray,
     labels: ByteArray,
     base: BaseOutfit,
     s: PieceSettings = PieceSettings(),
-): Pair<List<RawPiece>, List<String>> {
+): Pair<List<RawPiece>, List<DroppedPiece>> {
     val n = labels.size
     val pieces = mutableListOf<RawPiece>()
-    val notes = mutableListOf<String>()
+    val notes = mutableListOf<DroppedPiece>()
     // Lighting: shift this photo's colours so my skin matches the body figure's skin (experiment_light.py).
     val skinMask = SKIN.maskOf(labels)
     val skin = if (base.skin != null && skinMask.count { it } >= s.minSkinPixels) medianLab(lab, skinMask) else null
@@ -127,7 +138,7 @@ fun extractPieces(
         val worn = base.worn[type]
         val median = medianLab(lab, region)
         if (worn != null && median != null && weightedDeltaE(median, 0, worn, lw) < s.baseDeltaE) {
-            notes += "${type.key}: already worn on body figure"
+            notes += DroppedPiece(type, DroppedPiece.Reason.ALREADY_WORN)
             continue
         }
         val palette = type.base?.let { base.palettes[it] }.orEmpty()
@@ -144,7 +155,7 @@ fun extractPieces(
         }
         val frac = baseCount.toFloat() / regionCount
         if (frac >= s.basePieceFrac) {
-            notes += "${type.key}: base outfit (${(frac * 100).toInt()}% base colour)"
+            notes += DroppedPiece(type, DroppedPiece.Reason.BASE_OUTFIT, frac)
             continue
         }
         pieces += RawPiece(type, keep, region, frac)

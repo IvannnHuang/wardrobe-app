@@ -87,8 +87,11 @@ Raw photos are written to disk before anything else so nothing is lost.
 Per garment, resumable WorkManager job:
 1. **Segment** each photo with the clothes model → pieces (top, dress, bottom, shoes, hat, bag, belt, scarf).
 2. **Remove the base outfit by colour:** base-top colours (learned from the body figure) are removed from tops, base-bottom colours from bottoms; a piece that is mostly base colour is the base garment and is dropped, as are shoes/hats already worn on the body figure. Open garments get transparent interiors. Edge cleanup.
-3. **Align** each piece onto the body figure using pose landmarks (similarity transform).
+   Colours are compared after a lighting correction (shift so my skin matches the body figure's skin) with lightness weighted 0.5 (`prototype/experiment_light.py`).
+   The 4 views vote: a piece seen as base outfit / already worn in at least as many views as it was kept is dropped everywhere; a piece kept in only 1 of 3+ views is dropped.
+3. **Align** each piece onto the body figure using pose landmarks (similarity transform; tops: shoulders + hips, bottoms: hips → ankles, shoes: ankles + feet).
    Method chosen by `prototype/experiment.py` (2026-10-21): it beat the older "diff vs body figure" method, which broke whenever the tablet or light moved.
+   Clothes model runs as fp32 on CPU via ONNX Runtime (1.5 s/photo on the Tab S7+; fp16 was slower, fp16+XNNPACK wrong, NNAPI slower). Body figure model results are cached per figure/view. ~11 s per garment.
 4. **Tagging** (below), each tag with a confidence score.
 5. **Matching:** suggest "new item" or "version of existing item".
 6. Status → `READY_FOR_REVIEW`; notify "N items ready to review".
