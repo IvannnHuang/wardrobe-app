@@ -19,34 +19,47 @@ import java.nio.FloatBuffer
  * Same preprocessing as prototype/clothes.py: 512x512, ImageNet mean/std; logits are upsampled to the
  * photo size per label and the best label per pixel is kept. Not thread-safe; close when done.
  */
-class ClothesSegmenter(context: Context) : Closeable {
+class ClothesSegmenter(
+    context: Context,
+    provider: Provider = DEFAULT_PROVIDER,
+    /** Model file to load instead of the bundled one (benchmarks). */
+    modelFile: File? = null,
+) : Closeable {
+
+    /** Where ONNX Runtime runs the model. */
+    enum class Provider { CPU, XNNPACK, NNAPI }
 
     private val env = OrtEnvironment.getEnvironment()
     private val session: OrtSession
 
     init {
-        // ONNX Runtime needs a file path; copy the model out of the APK once (55 MB) instead of loading
-        // it onto the Java heap.
-        val file = File(context.noBackupFilesDir, MODEL_ASSET.substringAfterLast('/'))
-        val assetSize = context.assets.openFd(MODEL_ASSET).use { it.length }
-        if (!file.exists() || file.length() != assetSize) {
-            val tmp = File(file.path + ".tmp")
-            context.assets.open(MODEL_ASSET).use { input -> tmp.outputStream().use { input.copyTo(it) } }
-            tmp.renameTo(file)
-        }
+        val file = modelFile ?: bundledModel(context)
         session = env.createSession(
             file.path,
             OrtSession.SessionOptions().apply {
-                setIntraOpNumThreads(4)
                 setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+                when (provider) {
+                    Provider.CPU -> setIntraOpNumThreads(4)
+                    Provider.XNNPACK -> {
+                        setIntraOpNumThreads(1) // XNNPACK has its own thread pool
+                        addXnnpack(mapOf("intra_op_num_threads" to "4"))
+                    }
+                    Provider.NNAPI -> {
+                        setIntraOpNumThreads(4)
+                        addNnapi()
+                    }
+                }
             },
         )
     }
 
+    /** Raw model output for an RGB CV_8UC3 image: logits [label][y][x] at the model's resolution. */
+    class Logits(val data: FloatArray, val labels: Int, val height: Int, val width: Int)
+
     /** Label per pixel (row-major, values 0..17) for an RGB CV_8UC3 image. */
-    fun labels(rgb: Mat): ByteArray {
-        val w = rgb.cols()
-        val h = rgb.rows()
+    fun labels(rgb: Mat): ByteArray = upsample(logits(rgb), rgb.cols(), rgb.rows())
+
+    fun logits(rgb: Mat): Logits {
         val small = Mat()
         Imgproc.resize(rgb, small, Size(SIZE.toDouble(), SIZE.toDouble()), 0.0, 0.0, Imgproc.INTER_LINEAR)
         val px = ByteArray(SIZE * SIZE * 3).also { small.get(0, 0, it) }
@@ -65,7 +78,15 @@ class ClothesSegmenter(context: Context) : Closeable {
             }
         }
         val (data, lh, lw) = logits
-        val classes = data.size / (lh * lw)
+        return Logits(data, data.size / (lh * lw), lh, lw)
+    }
+
+    /** Upsamples each label's logits to w x h and keeps the best label per pixel. */
+    fun upsample(logits: Logits, w: Int, h: Int): ByteArray {
+        val data = logits.data
+        val lh = logits.height
+        val lw = logits.width
+        val classes = logits.labels
 
         // Upsample one label's logits at a time and keep the running best, so memory stays small.
         val best = Mat(h, w, CvType.CV_32F, Scalar(-1e9))
@@ -88,7 +109,24 @@ class ClothesSegmenter(context: Context) : Closeable {
     override fun close() = session.close()
 
     companion object {
-        const val MODEL_ASSET = "models/clothes_segformer_b2_fp16.onnx"
+        const val MODEL_ASSET = "models/clothes_segformer_b2_fp32.onnx"
+        /** fp32 on CPU: fastest correct option on the Tab S7+ (ClothesModelBenchmarkTest, 2026-10-21). */
+        val DEFAULT_PROVIDER = Provider.CPU
+
+        /** ONNX Runtime needs a file path: copy the model out of the APK once instead of loading 110 MB onto the heap. */
+        fun bundledModel(context: Context): File {
+            val file = File(context.noBackupFilesDir, MODEL_ASSET.substringAfterLast('/'))
+            // Remove copies of earlier model versions.
+            context.noBackupFilesDir.listFiles { f -> f.name.startsWith("clothes_segformer") && f.name != file.name }
+                ?.forEach { it.delete() }
+            val assetSize = context.assets.openFd(MODEL_ASSET).use { it.length }
+            if (!file.exists() || file.length() != assetSize) {
+                val tmp = File(file.path + ".tmp")
+                context.assets.open(MODEL_ASSET).use { input -> tmp.outputStream().use { input.copyTo(it) } }
+                tmp.renameTo(file)
+            }
+            return file
+        }
         private const val INPUT = "pixel_values"
         private const val SIZE = 512
         private val MEAN = floatArrayOf(0.485f, 0.456f, 0.406f)

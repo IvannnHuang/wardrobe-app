@@ -16,7 +16,7 @@ import onnxruntime as ort
 
 import pipeline as P
 
-MODEL = P.MODELS / "clothes_segformer_b2_fp16.onnx"
+MODEL = P.MODELS / "clothes_segformer_b2_fp32.onnx"
 SIZE = 512
 MEAN = np.array([0.485, 0.456, 0.406], np.float32)
 STD = np.array([0.229, 0.224, 0.225], np.float32)

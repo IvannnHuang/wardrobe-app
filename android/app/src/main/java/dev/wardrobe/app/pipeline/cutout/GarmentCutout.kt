@@ -25,6 +25,8 @@ import org.opencv.core.Mat
 import org.opencv.core.Size
 import org.opencv.imgproc.Imgproc
 import java.io.Closeable
+import java.io.DataInputStream
+import java.io.DataOutputStream
 import java.io.File
 import java.nio.ByteOrder
 
@@ -85,9 +87,59 @@ class GarmentCutout(
     )
     private val segmenter = ClothesSegmenter(context)
 
-    /** Loads a JPEG upright at work size and runs the pose and clothes models on it. */
-    fun analyse(photo: File): PhotoAnalysis {
+    /**
+     * Loads a JPEG upright at work size and runs the pose and clothes models on it. With [cache], the model
+     * results (landmarks, person mask, labels) are read from / written to that file, so the body figure's
+     * photos are only analysed once.
+     */
+    fun analyse(photo: File, cache: File? = null): PhotoAnalysis {
+        if (cache != null && cache.exists()) {
+            readCached(photo, cache)?.let { return it }
+        }
+        return analyseFresh(photo).also { a -> cache?.let { writeCache(a, it) } }
+    }
+
+    private fun readCached(photo: File, cache: File): PhotoAnalysis? = try {
+        DataInputStream(cache.inputStream().buffered()).use { inp ->
+            val w = inp.readInt()
+            val h = inp.readInt()
+            val landmarks = FloatArray(33 * 3) { inp.readFloat() }
+            val labels = ByteArray(w * h).also { inp.readFully(it) }
+            val packed = ByteArray((w * h + 7) / 8).also { inp.readFully(it) }
+            val person = BooleanArray(w * h) { (packed[it / 8].toInt() shr (it % 8)) and 1 == 1 }
+            val bitmap = loadUpright(photo, s.workLongSide)
+            if (bitmap.width != w || bitmap.height != h) return null
+            val rgba = Mat()
+            Utils.bitmapToMat(bitmap, rgba)
+            val rgb = Mat()
+            Imgproc.cvtColor(rgba, rgb, Imgproc.COLOR_RGBA2RGB)
+            rgba.release()
+            bitmap.recycle()
+            PhotoAnalysis(rgb, landmarks, person, toLab(rgb), labels)
+        }
+    } catch (e: java.io.IOException) {
+        null
+    }
+
+    private fun writeCache(a: PhotoAnalysis, cache: File) {
+        cache.parentFile?.mkdirs()
+        val tmp = File(cache.path + ".tmp")
+        DataOutputStream(tmp.outputStream().buffered()).use { out ->
+            out.writeInt(a.width)
+            out.writeInt(a.height)
+            a.landmarks.forEach { out.writeFloat(it) }
+            out.write(a.labels)
+            val packed = ByteArray((a.person.size + 7) / 8)
+            a.person.forEachIndexed { i, on -> if (on) packed[i / 8] = (packed[i / 8].toInt() or (1 shl (i % 8))).toByte() }
+            out.write(packed)
+        }
+        tmp.renameTo(cache)
+    }
+
+    private fun analyseFresh(photo: File): PhotoAnalysis {
+        val t0 = android.os.SystemClock.uptimeMillis()
         val bitmap = loadUpright(photo, s.workLongSide)
+        val t1 = android.os.SystemClock.uptimeMillis()
         val w = bitmap.width
         val h = bitmap.height
         val poseResult = pose.detect(BitmapImageBuilder(bitmap).build())
@@ -111,6 +163,7 @@ class GarmentCutout(
         }
         val pf = FloatArray(w * h).also { personMat.get(0, 0, it) }
         personMat.release()
+        val t2 = android.os.SystemClock.uptimeMillis()
 
         val rgba = Mat()
         Utils.bitmapToMat(bitmap, rgba)
@@ -118,7 +171,12 @@ class GarmentCutout(
         Imgproc.cvtColor(rgba, rgb, Imgproc.COLOR_RGBA2RGB)
         rgba.release()
         bitmap.recycle()
-        return PhotoAnalysis(rgb, landmarks, BooleanArray(w * h) { pf[it] > s.personThreshold }, toLab(rgb), segmenter.labels(rgb))
+        val lab = toLab(rgb)
+        val t3 = android.os.SystemClock.uptimeMillis()
+        val labels = segmenter.labels(rgb)
+        val t4 = android.os.SystemClock.uptimeMillis()
+        android.util.Log.i("GarmentCutout", "analyse ${photo.name}: decode ${t1 - t0} ms, pose ${t2 - t1} ms, lab ${t3 - t2} ms, clothes model ${t4 - t3} ms")
+        return PhotoAnalysis(rgb, landmarks, BooleanArray(w * h) { pf[it] > s.personThreshold }, lab, labels)
     }
 
     /** Finds the garment pieces in [garment], using the base outfit learned from the body figure. */

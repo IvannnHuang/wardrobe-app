@@ -27,7 +27,7 @@ import pipeline as P
 
 OUT = P.OUTPUT / "export"
 NAME = "b2"
-CHOSEN = "clothes_segformer_b2_fp16.onnx"
+CHOSEN = "clothes_segformer_b2_fp32.onnx"
 SIZE = 512
 
 
@@ -111,11 +111,15 @@ def main() -> None:
               f"min {r['min_iou']:.3f}, {r['mean_sec_cpu']} s/photo (PC CPU)")
     (OUT / "report.json").write_text(json.dumps(report, indent=1))
 
-    # fp16 chosen (2026-10-21): identical masks to PyTorch at half the size; int8 broke some pieces.
+    # fp32 chosen (2026-10-21). On PC, fp16 matched PyTorch at half the size and int8 broke some pieces, but
+    # the tablet benchmark (ClothesModelBenchmarkTest) showed fp32 CPU 1.7 s vs fp16 CPU 3.1 s per photo
+    # (the CPU has no native fp16), fp16+XNNPACK gave wrong labels, and NNAPI was slower.
     for dest in (P.MODELS, P.ROOT.parent / "android/app/src/main/assets/models"):
         dest.mkdir(parents=True, exist_ok=True)
-        shutil.copy(fp16, dest / CHOSEN)
-    print(f"copied {CHOSEN} ({hashlib.sha256(fp16.read_bytes()).hexdigest()[:16]}…) to prototype/models and app assets")
+        for old in dest.glob("clothes_segformer_b2_*.onnx"):
+            old.unlink()
+        shutil.copy(fp32, dest / CHOSEN)
+    print(f"copied {CHOSEN} ({hashlib.sha256(fp32.read_bytes()).hexdigest()[:16]}…) to prototype/models and app assets")
 
 
 if __name__ == "__main__":

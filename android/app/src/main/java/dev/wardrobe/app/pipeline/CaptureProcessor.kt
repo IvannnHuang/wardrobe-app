@@ -49,6 +49,10 @@ class CaptureProcessor @Inject constructor(
         val mainFromFront = mutableSetOf<PieceType>()
         val sideThickness = mutableMapOf<PieceType, MutableList<Measured<Int>>>()
 
+        // Body figure model results are cached per body figure and view (they're the same for every garment).
+        val cacheDir = java.io.File(context.noBackupFilesDir, "body-cache")
+        cacheDir.listFiles { f -> !f.name.startsWith("${body.id}-") }?.forEach { it.delete() }
+
         GarmentCutout(context).use { cutout ->
             // Front first, so its measurements are preferred for the main tags.
             for (view in View.entries) {
@@ -57,10 +61,12 @@ class CaptureProcessor @Inject constructor(
                 var b: PhotoAnalysis? = null
                 var g: PhotoAnalysis? = null
                 try {
-                    b = cutout.analyse(photoStore.file(body.path(view)))
+                    b = cutout.analyse(photoStore.file(body.path(view)), java.io.File(cacheDir, "${body.id}-${view.key}.bin"))
                     g = cutout.analyse(photoStore.file(rawPath))
+                    val tPieces = System.currentTimeMillis()
                     val base = learnBase(b.lab, b.labels)
                     val (found, notes) = cutout.pieces(g, b, base)
+                    val tTags = System.currentTimeMillis()
                     for (p in found) {
                         val png = ByteArrayOutputStream().also { p.rgbaInBody.compress(Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()
                         p.rgbaInBody.recycle()
@@ -80,7 +86,9 @@ class CaptureProcessor @Inject constructor(
                         }
                         PieceTagger.thickness(p.type, view, p, b)?.let { sideThickness.getOrPut(p.type) { mutableListOf() } += it }
                     }
-                    views.put(view.key, JSONObject().put("notes", JSONArray(notes)).put("ms", System.currentTimeMillis() - started))
+                    val done = System.currentTimeMillis()
+                    Log.i(TAG, "entry ${entry.id} ${view.key}: analyse ${tPieces - started} ms, pieces ${tTags - tPieces} ms, save+tags ${done - tTags} ms")
+                    views.put(view.key, JSONObject().put("notes", JSONArray(notes)).put("ms", done - started))
                 } catch (e: IllegalStateException) {
                     // One bad angle (e.g. nobody detected) shouldn't sink the garment; the review shows the error.
                     Log.w(TAG, "entry ${entry.id} ${view.key}: ${e.message}")

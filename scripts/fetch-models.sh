@@ -18,8 +18,8 @@ MODELS=(
 
 # The clothes model is exported from PyTorch (pinned revision), not downloaded as-is:
 #   cd prototype && .venv/Scripts/python export_clothes_model.py
-if [ ! -f "$ANDROID_DIR/clothes_segformer_b2_fp16.onnx" ]; then
-  echo "NOTE: clothes_segformer_b2_fp16.onnx missing - run prototype/export_clothes_model.py"
+if [ ! -f "$ANDROID_DIR/clothes_segformer_b2_fp32.onnx" ]; then
+  echo "NOTE: clothes_segformer_b2_fp32.onnx missing - run prototype/export_clothes_model.py"
 fi
 
 for entry in "${MODELS[@]}"; do
