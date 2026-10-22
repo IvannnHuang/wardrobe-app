@@ -99,6 +99,9 @@ def body_regions(lm: np.ndarray, person: np.ndarray, min_vis: float = 0.5) -> di
     def add(name, m):
         regions[name] = regions.get(name, np.zeros(shape, bool)) | (m & person)
 
+    quad = np.zeros(shape, np.uint8)
+    cv2.fillPoly(quad, [lm[[11, 12, 24, 23], :2].astype(np.int32)], 1)
+    quad = quad.astype(bool)  # arms are measured outside the plain shoulder-hip quad
     torso_pts = [i for i in (11, 12, 24, 23) if lm[i, 2] >= min_vis]
     if len(torso_pts) >= 3:
         m = np.zeros(shape, np.uint8)
@@ -120,9 +123,9 @@ def body_regions(lm: np.ndarray, person: np.ndarray, min_vis: float = 0.5) -> di
         add("knees", knees)
     for s, e, w, hip, knee, ankle, heel, toe in ((11, 13, 15, 23, 25, 27, 29, 31), (12, 14, 16, 24, 26, 28, 30, 32)):
         if vis(s, e):
-            add("upperArms", _capsule(shape, lm[s, :2], lm[e, :2], 0.16 * T))
+            add("upperArms", _capsule(shape, lm[s, :2], lm[e, :2], 0.16 * T) & ~quad)
         if vis(e, w):
-            add("forearms", _capsule(shape, lm[e, :2], lm[w, :2], 0.13 * T))
+            add("forearms", _capsule(shape, lm[e, :2], lm[w, :2], 0.13 * T) & ~quad)
         if vis(hip, knee):
             add("thighs", _capsule(shape, lm[hip, :2], lm[knee, :2], 0.22 * T) & ~knees)
         if vis(knee, ankle):
@@ -151,9 +154,9 @@ def sleeve_length(cov: dict) -> tuple[str, float]:
         return "long", 0.9
     if fo > 0.35:
         return "three-quarter", 0.7
-    if up > 0.6:
+    if up > 0.45:
         return "short", 0.8
-    if up > 0.2:
+    if up > 0.15:
         return "cap", 0.6
     return "sleeveless", 0.8
 
@@ -220,14 +223,21 @@ def rise(mask: np.ndarray, lm: np.ndarray, upper: np.ndarray | None = None) -> t
     return name, round(r, 2), 0.4
 
 
-def _run_width(mask_row: np.ndarray, x: float) -> int:
-    """Width of the mask run on this row that contains (or is nearest to) column x."""
-    xs = np.nonzero(mask_row)[0]
+def _run_width(mask_row: np.ndarray, x: float, lo: int = 0, hi: int | None = None) -> float:
+    """Width of the mask run on this row that contains (or is nearest to) column x, within [lo, hi).
+    A run cut off at an inner boundary (wide legs touching) is assumed symmetric around x."""
+    full = len(mask_row)
+    hi = full if hi is None else hi
+    xs = np.nonzero(mask_row[lo:hi])[0] + lo
     if len(xs) == 0:
         return 0
     runs = np.split(xs, np.nonzero(np.diff(xs) > 1)[0] + 1)
     best = min(runs, key=lambda r: 0 if r[0] <= x <= r[-1] else min(abs(r[0] - x), abs(r[-1] - x)))
-    return int(best[-1] - best[0] + 1)
+    if best[0] == lo and lo > 0:
+        return 2 * max(1.0, best[-1] - x)
+    if best[-1] == hi - 1 and hi < full:
+        return 2 * max(1.0, x - best[0])
+    return float(best[-1] - best[0] + 1)
 
 
 def leg_widths(mask: np.ndarray, lm: np.ndarray) -> dict[str, float]:
@@ -237,13 +247,16 @@ def leg_widths(mask: np.ndarray, lm: np.ndarray) -> dict[str, float]:
               "calf": ((25, 27), (26, 28), 0.5), "ankle": ((27, 27), (28, 28), 0.0)}
     for name, (left, right, t) in levels.items():
         ws = []
-        for a, b in (left, right):
+        pts = [lm[a, :2] + (lm[b, :2] - lm[a, :2]) * t for a, b in (left, right)]
+        both = all(lm[a, 2] >= 0.5 and lm[b, 2] >= 0.5 for a, b in (left, right))
+        mid = int((pts[0][0] + pts[1][0]) / 2)
+        for (a, b), p in zip((left, right), pts):
             if lm[a, 2] < 0.5 or lm[b, 2] < 0.5:
                 continue
-            p = lm[a, :2] + (lm[b, :2] - lm[a, :2]) * t
             y = int(round(p[1]))
             if 0 <= y < mask.shape[0]:
-                w = _run_width(mask[y], p[0])
+                lo, hi = (0, None) if not both else ((0, mid) if p[0] < mid else (mid, None))
+                w = _run_width(mask[y], p[0], lo, hi)
                 if w:
                     ws.append(w)
         if ws:
