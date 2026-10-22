@@ -2,32 +2,26 @@ package dev.wardrobe.app.domain.cutout
 
 import kotlin.math.atan2
 import kotlin.math.hypot
-import kotlin.math.sqrt
 
-// Pixel math for the garment cut-out, ported from prototype/pipeline.py. Pure Kotlin so it can be
-// unit-tested; image operations (blur, warp, distance transform) live in pipeline/cutout.
+// Aligning a garment piece onto the body figure: a similarity transform (scale + rotation + shift)
+// fitted to matching pose landmarks. Pure Kotlin so it can be unit-tested.
 
-/** Shoulders, hips, knees, ankles: the pose landmarks used to align a garment photo to the body figure. */
+/** Shoulders, hips, knees, ankles: default alignment points. */
 val ALIGN_POINTS = intArrayOf(11, 12, 23, 24, 25, 26, 27, 28)
 
-/** Selfie multiclass segmenter labels. */
-object SegClass {
-    const val BACKGROUND = 0
-    const val HAIR = 1
-    const val BODY_SKIN = 2
-    const val FACE_SKIN = 3
-    const val CLOTHES = 4
-    const val OTHER = 5
+/** Landmarks to align each piece with (CLAUDE.md: tops shoulders + hips, bottoms hips to ankles, shoes ankles). */
+fun alignPointsFor(piece: PieceType): IntArray = when (piece) {
+    PieceType.TOP, PieceType.SCARF, PieceType.BAG -> intArrayOf(11, 12, 23, 24)
+    PieceType.DRESS -> intArrayOf(11, 12, 23, 24, 25, 26)
+    PieceType.BOTTOM, PieceType.BELT -> intArrayOf(23, 24, 25, 26, 27, 28)
+    PieceType.SHOES -> intArrayOf(27, 28, 29, 30, 31, 32)
+    PieceType.HAT -> intArrayOf(0, 7, 8, 11, 12)
 }
 
 data class CutoutSettings(
     val minVisibility: Float = 0.6f,
-    /** LAB colour difference (Delta E) that counts as "changed" vs the body figure. */
-    val changeThreshold: Float = 14f,
     val personThreshold: Float = 0.5f,
-    /** Beyond this distance (px) from visible base outfit, person pixels count as garment (hood, wide sleeve). */
-    val edgeBandPx: Float = 16f,
-    /** Blobs smaller than this fraction of the largest are dropped. */
+    /** Blobs smaller than this fraction of the piece's largest blob are dropped. */
     val minComponentFrac: Float = 0.02f,
     val featherPx: Double = 1.5,
     /** Long side (px) the photos are processed at. */
@@ -67,16 +61,6 @@ fun fitSimilarity(src: List<DoubleArray>, dst: List<DoubleArray>): Similarity {
     return Similarity(a, b, dx - (a * sx - b * sy), dy - (b * sx + a * sy))
 }
 
-/** Per-garment-view processing report, stored with the cut-out paths. */
-data class CutoutReport(
-    val alignPoints: Int,
-    val alignScale: Double,
-    val alignRotationDeg: Double,
-    val alignErrorPx: Double,
-    val lightingShiftL: Float,
-    val garmentAreaFrac: Float,
-    val warnings: List<String>,
-)
 
 /**
  * Picks the landmarks visible in both photos and fits the transform from garment photo to body figure.
@@ -88,8 +72,9 @@ fun alignToBody(
     imageLongSide: Int,
     s: CutoutSettings,
     warnings: MutableList<String>,
+    points: IntArray = ALIGN_POINTS,
 ): Pair<Similarity, Pair<Int, Double>> {
-    val ids = ALIGN_POINTS.filter { garment[it * 3 + 2] >= s.minVisibility && body[it * 3 + 2] >= s.minVisibility }
+    val ids = points.filter { garment[it * 3 + 2] >= s.minVisibility && body[it * 3 + 2] >= s.minVisibility }
     if (ids.size < 2) throw IllegalStateException("fewer than 2 body points visible in both photos; cannot align")
     val src = ids.map { doubleArrayOf(garment[it * 3].toDouble(), garment[it * 3 + 1].toDouble()) }
     val dst = ids.map { doubleArrayOf(body[it * 3].toDouble(), body[it * 3 + 1].toDouble()) }
@@ -101,56 +86,4 @@ fun alignToBody(
     if (ids.size < 4) warnings += "only ${ids.size} alignment points; alignment may be poor"
     if (error > 0.01 * imageLongSide) warnings += "pose differs from body figure (mean point error %.1f px)".format(error)
     return m to (ids.size to error)
-}
-
-/** Median of the values at [mask] for one channel of an interleaved 3-channel array (sampled for speed). */
-fun maskedMedian(values: FloatArray, channel: Int, mask: BooleanArray, maxSamples: Int = 50_000): Float {
-    val count = mask.count { it }
-    if (count == 0) return 0f
-    val step = maxOf(1, count / maxSamples)
-    val picked = FloatArray((count + step - 1) / step)
-    var seen = 0
-    var k = 0
-    for (i in mask.indices) {
-        if (!mask[i]) continue
-        if (seen % step == 0 && k < picked.size) picked[k++] = values[i * 3 + channel]
-        seen++
-    }
-    picked.sort(0, k)
-    return picked[k / 2]
-}
-
-/**
- * Lighting match: shift garment LAB so the shared background (wall) matches the body figure's.
- * Returns the L/a/b shift applied (in place on [labG]).
- */
-fun matchLighting(labG: FloatArray, labB: FloatArray, background: BooleanArray, warnings: MutableList<String>): FloatArray {
-    if (background.count { it } < 1000) {
-        warnings += "too little shared background to match lighting"
-        return floatArrayOf(0f, 0f, 0f)
-    }
-    val shift = FloatArray(3) { c -> maskedMedian(labB, c, background) - maskedMedian(labG, c, background) }
-    for (i in background.indices) for (c in 0..2) labG[i * 3 + c] += shift[c]
-    if (kotlin.math.abs(shift[0]) > 8) warnings += "brightness changed vs body figure (L shift %.1f)".format(shift[0])
-    return shift
-}
-
-/**
- * Which pixels differ from the body figure: colour vs the nearest "before" pixel (reliable base outfit),
- * or too far from any such pixel (garment sticking out past the body).
- * [nearest] holds, per pixel, the index of the nearest reliable body-figure pixel (or -1), [dist] its distance.
- */
-fun changedMask(
-    labG: FloatArray,
-    labB: FloatArray,
-    nearest: IntArray,
-    dist: FloatArray,
-    s: CutoutSettings,
-): BooleanArray = BooleanArray(nearest.size) { i ->
-    val j = nearest[i]
-    if (j < 0 || dist[i] > s.edgeBandPx) return@BooleanArray true
-    val dl = labG[i * 3] - labB[j * 3]
-    val da = labG[i * 3 + 1] - labB[j * 3 + 1]
-    val db = labG[i * 3 + 2] - labB[j * 3 + 2]
-    sqrt(dl * dl + da * da + db * db) > s.changeThreshold
 }

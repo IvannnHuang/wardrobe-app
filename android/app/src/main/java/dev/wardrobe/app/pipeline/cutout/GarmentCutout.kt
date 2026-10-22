@@ -9,14 +9,14 @@ import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.framework.image.ByteBufferExtractor
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.vision.core.RunningMode
-import com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenter
 import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker
-import dev.wardrobe.app.domain.cutout.CutoutReport
+import dev.wardrobe.app.domain.cutout.BaseOutfit
 import dev.wardrobe.app.domain.cutout.CutoutSettings
-import dev.wardrobe.app.domain.cutout.SegClass
+import dev.wardrobe.app.domain.cutout.PieceSettings
+import dev.wardrobe.app.domain.cutout.PieceType
+import dev.wardrobe.app.domain.cutout.alignPointsFor
 import dev.wardrobe.app.domain.cutout.alignToBody
-import dev.wardrobe.app.domain.cutout.changedMask
-import dev.wardrobe.app.domain.cutout.matchLighting
+import dev.wardrobe.app.domain.cutout.extractPieces
 import dev.wardrobe.app.pipeline.pose.PoseDetector
 import org.opencv.android.OpenCVLoader
 import org.opencv.android.Utils
@@ -28,27 +28,47 @@ import java.io.Closeable
 import java.io.File
 import java.nio.ByteOrder
 
-/** One photo after the models ran: upright RGB (work size), pose landmarks (px), person mask, segmenter classes. */
-class Analysis(
-    val rgb: Mat,              // CV_8UC3
-    val landmarks: FloatArray, // 33 x (x px, y px, visibility)
-    val person: Mat,           // CV_32F 0..1
-    val classes: Mat,          // CV_8U segmenter labels
+/** One photo after the models ran, at work size. */
+class PhotoAnalysis(
+    val rgb: Mat,               // CV_8UC3, upright
+    val landmarks: FloatArray,  // 33 x (x px, y px, visibility)
+    val person: BooleanArray,   // pose model's person mask, thresholded
+    val lab: FloatArray,        // CIELAB per pixel (lightly blurred), interleaved
+    val labels: ByteArray,      // clothes model label per pixel
 ) {
     val width get() = rgb.cols()
     val height get() = rgb.rows()
-    fun release() { rgb.release(); person.release(); classes.release() }
+    fun release() = rgb.release()
 }
 
-class CutoutResult(val rgba: Bitmap, val report: CutoutReport)
+/** One garment piece found in one view. */
+class PieceResult(
+    val type: PieceType,
+    /** Cleaned piece mask in the garment photo's frame (used for tags). */
+    val mask: BooleanArray,
+    /** The model's region for this piece before base-colour removal (used for sheerness). */
+    val region: BooleanArray,
+    val baseFrac: Float,
+    /** Piece mask moved into the body figure's frame (used for side-view thickness). */
+    val maskInBody: BooleanArray,
+    /** Transparent cut-out in the body figure's frame, ready to draw on the body figure. */
+    val rgbaInBody: Bitmap,
+    val alignPoints: Int,
+    val alignErrorPx: Double,
+    val areaFrac: Float,
+    val warnings: List<String>,
+)
 
 /**
- * Garment cut-out on the tablet, ported from prototype/pipeline.py: align the garment photo to the body
- * figure with pose landmarks, then keep the person pixels that differ from the body figure (minus
- * skin/hair), clean up, and feather the edge. Output is in the body figure's frame, so it can be drawn
- * straight onto the body figure. Not thread-safe; close when done.
+ * Garment cut-out (method C, mirrors prototype/clothes.py): the clothes model splits the photo into pieces,
+ * the base outfit is removed by colour, each piece is cleaned up and aligned onto the body figure.
+ * Not thread-safe; close when done.
  */
-class GarmentCutout(context: Context, private val s: CutoutSettings = CutoutSettings()) : Closeable {
+class GarmentCutout(
+    context: Context,
+    private val s: CutoutSettings = CutoutSettings(),
+    private val pieceSettings: PieceSettings = PieceSettings(),
+) : Closeable {
 
     init {
         check(OpenCVLoader.initLocal()) { "OpenCV failed to load" }
@@ -63,27 +83,15 @@ class GarmentCutout(context: Context, private val s: CutoutSettings = CutoutSett
             .setOutputSegmentationMasks(true)
             .build(),
     )
+    private val segmenter = ClothesSegmenter(context)
 
-    private val segmenter = ImageSegmenter.createFromOptions(
-        context,
-        ImageSegmenter.ImageSegmenterOptions.builder()
-            .setBaseOptions(BaseOptions.builder().setModelAssetPath(SEGMENTER_ASSET).build())
-            .setRunningMode(RunningMode.IMAGE)
-            .setOutputCategoryMask(true)
-            .setOutputConfidenceMasks(false)
-            .build(),
-    )
-
-    /** Loads a JPEG upright (EXIF) at work size and runs the pose model and the segmenter on it. */
-    fun analyse(photo: File): Analysis {
+    /** Loads a JPEG upright at work size and runs the pose and clothes models on it. */
+    fun analyse(photo: File): PhotoAnalysis {
         val bitmap = loadUpright(photo, s.workLongSide)
-        val image = BitmapImageBuilder(bitmap).build()
         val w = bitmap.width
         val h = bitmap.height
-
-        val poseResult = pose.detect(image)
-        val lm = poseResult.landmarks().firstOrNull()
-            ?: throw IllegalStateException("no person found in ${photo.name}")
+        val poseResult = pose.detect(BitmapImageBuilder(bitmap).build())
+        val lm = poseResult.landmarks().firstOrNull() ?: throw IllegalStateException("no person found in ${photo.name}")
         val landmarks = FloatArray(33 * 3)
         lm.forEachIndexed { i, p ->
             landmarks[i * 3] = p.x() * w
@@ -91,18 +99,18 @@ class GarmentCutout(context: Context, private val s: CutoutSettings = CutoutSett
             landmarks[i * 3 + 2] = p.visibility().orElse(0f)
         }
         val maskImage = poseResult.segmentationMasks().get().first()
-        val person = Mat(maskImage.height, maskImage.width, CvType.CV_32F).apply {
+        var personMat = Mat(maskImage.height, maskImage.width, CvType.CV_32F).apply {
             val floats = ByteBufferExtractor.extract(maskImage).order(ByteOrder.nativeOrder()).asFloatBuffer()
-            val arr = FloatArray(floats.remaining()).also { floats.get(it) }
-            put(0, 0, arr)
-        }.resizedTo(w, h, Imgproc.INTER_LINEAR)
-
-        val categoryImage = segmenter.segment(image).categoryMask().get()
-        val classes = Mat(categoryImage.height, categoryImage.width, CvType.CV_8U).apply {
-            val bytes = ByteBufferExtractor.extract(categoryImage)
-            val arr = ByteArray(bytes.remaining()).also { bytes.get(it) }
-            put(0, 0, arr)
-        }.resizedTo(w, h, Imgproc.INTER_NEAREST)
+            put(0, 0, FloatArray(floats.remaining()).also { floats.get(it) })
+        }
+        if (personMat.cols() != w || personMat.rows() != h) {
+            val r = Mat()
+            Imgproc.resize(personMat, r, Size(w.toDouble(), h.toDouble()))
+            personMat.release()
+            personMat = r
+        }
+        val pf = FloatArray(w * h).also { personMat.get(0, 0, it) }
+        personMat.release()
 
         val rgba = Mat()
         Utils.bitmapToMat(bitmap, rgba)
@@ -110,112 +118,72 @@ class GarmentCutout(context: Context, private val s: CutoutSettings = CutoutSett
         Imgproc.cvtColor(rgba, rgb, Imgproc.COLOR_RGBA2RGB)
         rgba.release()
         bitmap.recycle()
-        return Analysis(rgb, landmarks, person, classes)
+        return PhotoAnalysis(rgb, landmarks, BooleanArray(w * h) { pf[it] > s.personThreshold }, toLab(rgb), segmenter.labels(rgb))
     }
 
-    /** Cuts the garment out of [garment] using [body] (the body figure, same view) as the "before" picture. */
-    fun cutOut(garment: Analysis, body: Analysis): CutoutResult {
-        val warnings = mutableListOf<String>()
-        val w = body.width
-        val h = body.height
-        val n = w * h
-
-        // 1. Align garment photo onto the body figure (similarity transform from matching landmarks).
-        val (m, info) = alignToBody(garment.landmarks, body.landmarks, maxOf(w, h), s, warnings)
-        val affine = Mat(2, 3, CvType.CV_64F).apply { put(0, 0, *m.asRowMajor()) }
-        val size = Size(w.toDouble(), h.toDouble())
-        fun warp(src: Mat, interp: Int) = Mat().also { Imgproc.warpAffine(src, it, affine, size, interp) }
-        val rgbG = warp(garment.rgb, Imgproc.INTER_LINEAR)
-        val personG = warp(garment.person, Imgproc.INTER_LINEAR)
-        val classesG = warp(garment.classes, Imgproc.INTER_NEAREST)
-        val ones = Mat.ones(garment.height, garment.width, CvType.CV_8U)
-        val validMat = warp(ones, Imgproc.INTER_NEAREST)
-        ones.release()
-
-        val personGArr = personG.floats()
-        val personBArr = body.person.floats()
-        val classesGArr = classesG.bytes()
-        val classesBArr = body.classes.bytes()
-        val valid = validMat.bytes()
-        val isPersonG = BooleanArray(n) { personGArr[it] > s.personThreshold && valid[it].toInt() != 0 }
-        val isPersonB = BooleanArray(n) { personBArr[it] > s.personThreshold }
-
-        // 2. Colours in LAB, lightly blurred; match lighting on the shared background.
-        val labB = toLab(body.rgb)
-        val labG = toLab(rgbG)
-        val background = BooleanArray(n) { !isPersonG[it] && !isPersonB[it] && valid[it].toInt() != 0 }
-        val shift = matchLighting(labG, labB, background, warnings)
-
-        // 3. Nearest reliable "before" pixel: any body-figure person pixel except hair/face.
-        val notReliable = Mat(h, w, CvType.CV_8U)
-        val nr = ByteArray(n) { i ->
-            val c = classesBArr[i].toInt()
-            if (isPersonB[i] && c != SegClass.HAIR && c != SegClass.FACE_SKIN) 0 else 1
+    /** Finds the garment pieces in [garment], using the base outfit learned from the body figure. */
+    fun pieces(garment: PhotoAnalysis, body: PhotoAnalysis, base: BaseOutfit): Pair<List<PieceResult>, List<String>> {
+        val (raw, notes) = extractPieces(garment.lab, garment.labels, base, pieceSettings)
+        val n = garment.width * garment.height
+        val results = raw.mapNotNull { piece ->
+            val clean = cleanup(piece.keep, garment.width, garment.height)
+            val kept = clean.count { it }
+            if (kept < pieceSettings.minPieceFrac * n) return@mapNotNull null
+            val warnings = mutableListOf<String>()
+            val (m, info) = try {
+                alignToBody(garment.landmarks, body.landmarks, maxOf(body.width, body.height), s, warnings, alignPointsFor(piece.type))
+            } catch (e: IllegalStateException) {
+                warnings += "${e.message}; placed without alignment"
+                dev.wardrobe.app.domain.cutout.Similarity(1.0, 0.0, 0.0, 0.0) to (0 to 0.0)
+            }
+            val (rgbaInBody, maskInBody) = warpIntoBody(garment.rgb, clean, garment.width, garment.height, m.asRowMajor(), body.width, body.height)
+            PieceResult(piece.type, clean, piece.region, piece.baseFrac, maskInBody, rgbaInBody, info.first, info.second, kept.toFloat() / n, warnings)
         }
-        notReliable.put(0, 0, nr)
-        val distMat = Mat()
-        val labelsMat = Mat()
-        Imgproc.distanceTransformWithLabels(notReliable, distMat, labelsMat, Imgproc.DIST_L2, 5, Imgproc.DIST_LABEL_PIXEL)
-        val dist = distMat.floats()
-        val labels = IntArray(n).also { labelsMat.get(0, 0, it) }
-        // DIST_LABEL_PIXEL gives each zero (reliable) pixel its own label; map labels back to pixel indices.
-        val labelToIndex = IntArray(n + 1) { -1 }
-        for (i in 0 until n) if (nr[i].toInt() == 0) labelToIndex[labels[i]] = i
-        val nearest = IntArray(n) { labelToIndex.getOrElse(labels[it]) { -1 } }
-        listOf(notReliable, distMat, labelsMat).forEach { it.release() }
-
-        val changed = changedMask(labG, labB, nearest, dist, s)
-
-        // 4. Garment = person, not skin/hair, changed vs body figure. Then clean up.
-        val raw = Mat(h, w, CvType.CV_8U)
-        raw.put(0, 0, ByteArray(n) { i ->
-            val c = classesGArr[i].toInt()
-            val skinHair = c == SegClass.HAIR || c == SegClass.BODY_SKIN || c == SegClass.FACE_SKIN
-            if (isPersonG[i] && !skinHair && changed[i]) 1 else 0
-        })
-        val keep = cleanup(raw)
-        raw.release()
-
-        // 5. Feathered alpha, limited by the person mask.
-        val keepF = Mat()
-        keep.convertTo(keepF, CvType.CV_32F)
-        Imgproc.GaussianBlur(keepF, keepF, Size(0.0, 0.0), s.featherPx)
-        val soft = keepF.floats()
-        var kept = 0
-        val keepArr = keep.bytes()
-        val alpha = ByteArray(n) { i ->
-            if (keepArr[i].toInt() != 0) kept++
-            val a = soft[i] * (personGArr[i] * 1.5f).coerceIn(0f, 1f)
-            (a * 255f).toInt().coerceIn(0, 255).toByte()
-        }
-        val area = kept.toFloat() / n
-        if (kept == 0) warnings += "nothing kept: garment looks identical to the body figure"
-
-        val bitmap = toRgbaBitmap(rgbG, alpha)
-        listOf(affine, rgbG, personG, classesG, validMat, keep, keepF).forEach { it.release() }
-        return CutoutResult(
-            bitmap,
-            CutoutReport(info.first, m.scale, m.rotationDeg, info.second, shift[0], area, warnings),
-        )
+        return results to notes
     }
 
-    private fun cleanup(mask: Mat): Mat {
-        val m = Mat()
-        Imgproc.morphologyEx(mask, m, Imgproc.MORPH_OPEN, Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(5.0, 5.0)))
+    /** Opening (remove specks), closing (fill pinholes), then drop blobs much smaller than the largest. */
+    private fun cleanup(mask: BooleanArray, w: Int, h: Int): BooleanArray {
+        val m = Mat(h, w, CvType.CV_8U).apply { put(0, 0, ByteArray(w * h) { if (mask[it]) 1 else 0 }) }
+        Imgproc.morphologyEx(m, m, Imgproc.MORPH_OPEN, Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(5.0, 5.0)))
         Imgproc.morphologyEx(m, m, Imgproc.MORPH_CLOSE, Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(9.0, 9.0)))
         val labels = Mat()
         val stats = Mat()
         val centroids = Mat()
         val count = Imgproc.connectedComponentsWithStats(m, labels, stats, centroids, 8)
-        if (count > 1) {
+        val out = if (count <= 1) {
+            ByteArray(w * h).also { m.get(0, 0, it) }.let { b -> BooleanArray(w * h) { b[it].toInt() != 0 } }
+        } else {
             val areas = IntArray(count) { stats.get(it, Imgproc.CC_STAT_AREA)[0].toInt() }
             val largest = (1 until count).maxOf { areas[it] }
-            val keepLabel = BooleanArray(count) { it > 0 && areas[it] >= s.minComponentFrac * largest }
-            val lab = IntArray(labels.rows() * labels.cols()).also { labels.get(0, 0, it) }
-            m.put(0, 0, ByteArray(lab.size) { if (keepLabel[lab[it]]) 1 else 0 })
+            val keep = BooleanArray(count) { it > 0 && areas[it] >= s.minComponentFrac * largest }
+            val lab = IntArray(w * h).also { labels.get(0, 0, it) }
+            BooleanArray(w * h) { keep[lab[it]] }
         }
-        listOf(labels, stats, centroids).forEach { it.release() }
-        return m
+        listOf(m, labels, stats, centroids).forEach { it.release() }
+        return out
+    }
+
+    /** Moves the piece into the body figure's frame: RGBA with a feathered edge, plus a hard mask. */
+    private fun warpIntoBody(
+        rgb: Mat, mask: BooleanArray, w: Int, h: Int, affine: DoubleArray, bw: Int, bh: Int,
+    ): Pair<Bitmap, BooleanArray> {
+        val size = Size(bw.toDouble(), bh.toDouble())
+        val mat = Mat(2, 3, CvType.CV_64F).apply { put(0, 0, *affine) }
+        val alpha = Mat(h, w, CvType.CV_32F).apply { put(0, 0, FloatArray(w * h) { if (mask[it]) 1f else 0f }) }
+        Imgproc.GaussianBlur(alpha, alpha, Size(0.0, 0.0), s.featherPx)
+        val alphaW = Mat()
+        val rgbW = Mat()
+        Imgproc.warpAffine(alpha, alphaW, mat, size, Imgproc.INTER_LINEAR)
+        Imgproc.warpAffine(rgb, rgbW, mat, size, Imgproc.INTER_LINEAR)
+        val a = FloatArray(bw * bh).also { alphaW.get(0, 0, it) }
+        val px = ByteArray(bw * bh * 3).also { rgbW.get(0, 0, it) }
+        val colors = IntArray(bw * bh) { i ->
+            val al = (a[i] * 255f).toInt().coerceIn(0, 255)
+            (al shl 24) or ((px[i * 3].toInt() and 0xFF) shl 16) or ((px[i * 3 + 1].toInt() and 0xFF) shl 8) or (px[i * 3 + 2].toInt() and 0xFF)
+        }
+        listOf(mat, alpha, alphaW, rgbW).forEach { it.release() }
+        return Bitmap.createBitmap(colors, bw, bh, Bitmap.Config.ARGB_8888) to BooleanArray(bw * bh) { a[it] >= 0.5f }
     }
 
     override fun close() {
@@ -224,8 +192,6 @@ class GarmentCutout(context: Context, private val s: CutoutSettings = CutoutSett
     }
 
     companion object {
-        const val SEGMENTER_ASSET = "models/selfie_multiclass_256x256.tflite"
-
         /** Decodes with EXIF rotation applied, downscaled so the long side is at most [longSide]. */
         fun loadUpright(file: File, longSide: Int): Bitmap {
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -247,7 +213,7 @@ class GarmentCutout(context: Context, private val s: CutoutSettings = CutoutSett
             return upright.copy(Bitmap.Config.ARGB_8888, false).also { if (it !== upright) upright.recycle() }
         }
 
-        /** Real LAB (L 0..100), after a 5x5 blur so JPEG noise and 1 px misalignment don't count as change. */
+        /** CIELAB (L 0..100) after a 5x5 blur, like prototype pipeline.to_lab. */
         private fun toLab(rgb: Mat): FloatArray {
             val blurred = Mat()
             Imgproc.GaussianBlur(rgb, blurred, Size(5.0, 5.0), 0.0)
@@ -257,27 +223,6 @@ class GarmentCutout(context: Context, private val s: CutoutSettings = CutoutSett
             Imgproc.cvtColor(f, lab, Imgproc.COLOR_RGB2Lab)
             val out = FloatArray(rgb.rows() * rgb.cols() * 3).also { lab.get(0, 0, it) }
             listOf(blurred, f, lab).forEach { it.release() }
-            return out
-        }
-
-        private fun toRgbaBitmap(rgb: Mat, alpha: ByteArray): Bitmap {
-            val w = rgb.cols()
-            val h = rgb.rows()
-            val px = ByteArray(w * h * 3).also { rgb.get(0, 0, it) }
-            val colors = IntArray(w * h) { i ->
-                ((alpha[i].toInt() and 0xFF) shl 24) or ((px[i * 3].toInt() and 0xFF) shl 16) or
-                    ((px[i * 3 + 1].toInt() and 0xFF) shl 8) or (px[i * 3 + 2].toInt() and 0xFF)
-            }
-            return Bitmap.createBitmap(colors, w, h, Bitmap.Config.ARGB_8888)
-        }
-
-        private fun Mat.floats() = FloatArray(rows() * cols()).also { get(0, 0, it) }
-        private fun Mat.bytes() = ByteArray(rows() * cols()).also { get(0, 0, it) }
-        private fun Mat.resizedTo(w: Int, h: Int, interp: Int): Mat {
-            if (cols() == w && rows() == h) return this
-            val out = Mat()
-            Imgproc.resize(this, out, Size(w.toDouble(), h.toDouble()), 0.0, 0.0, interp)
-            release()
             return out
         }
     }

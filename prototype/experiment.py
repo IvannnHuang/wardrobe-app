@@ -33,6 +33,7 @@ OUT = P.OUTPUT / "experiment"
 SETS = {
     "mirror-1": (P.PHOTOS, True),
     "tablet-1": (P.PHOTOS / "tablet-1", False),
+    "tablet-2": (P.PHOTOS / "tablet-2", False),
 }
 
 MODELS = {

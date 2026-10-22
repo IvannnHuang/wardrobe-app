@@ -12,8 +12,8 @@ mkdir -p "$ANDROID_DIR" "$PROTO_DIR"
 # name | url | sha256 | android (bundle in APK: yes/no)
 MODELS=(
   "pose_landmarker_full.task|https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task|4eaa5eb7a98365221087693fcc286334cf0858e2eb6e15b506aa4a7ecdcec4ad|yes"
-  # Labels each pixel: 0 background, 1 hair, 2 body skin, 3 face skin, 4 clothes, 5 other.
-  "selfie_multiclass_256x256.tflite|https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite|c6748b1253a99067ef71f7e26ca71096cd449baefa8f101900ea23016507e0e0|yes"
+  # Prototype only (method A / experiment.py): 0 background, 1 hair, 2 body skin, 3 face skin, 4 clothes, 5 other.
+  "selfie_multiclass_256x256.tflite|https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite|c6748b1253a99067ef71f7e26ca71096cd449baefa8f101900ea23016507e0e0|no"
 )
 
 # The clothes model is exported from PyTorch (pinned revision), not downloaded as-is:

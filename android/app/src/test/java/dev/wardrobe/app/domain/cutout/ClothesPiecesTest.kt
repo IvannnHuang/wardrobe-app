@@ -62,6 +62,30 @@ class ClothesPiecesTest {
     }
 
     @Test
+    fun lightingChangeIsCorrectedWithSkin() {
+        val skin = floatArrayOf(65f, 15f, 18f)
+        val bodyWithSkin = photo(
+            Triple(0 until 300, ClothesLabel.UPPER, teal),
+            Triple(300 until 600, ClothesLabel.PANTS, teal),
+            Triple(600 until 1000, ClothesLabel.FACE, skin),
+        ).let { (labels, lab) -> learnBase(lab, labels, PieceSettings(minSkinPixels = 100)) }
+        // Same base pants, but this photo is much darker and bluer: everything shifted by (-20, -8, -12).
+        fun dim(c: FloatArray) = floatArrayOf(c[0] - 20f, c[1] - 8f, c[2] - 12f)
+        val (labels, lab) = photo(
+            Triple(0 until 300, ClothesLabel.UPPER, dim(black)),
+            Triple(300 until 600, ClothesLabel.PANTS, dim(teal)),
+            Triple(600 until 1000, ClothesLabel.FACE, dim(skin)),
+        )
+        val settings = PieceSettings(minSkinPixels = 100)
+        val (pieces, notes) = extractPieces(lab, labels, bodyWithSkin, settings)
+        assertEquals(listOf(PieceType.TOP), pieces.map { it.type })
+        assertTrue(notes.single().startsWith("bottom: base outfit"))
+        // Without the skin reference the dimmed pants would no longer match the base colour.
+        val noSkin = extractPieces(lab, labels, bodyWithSkin.copy(skin = null), settings).first
+        assertTrue(noSkin.any { it.type == PieceType.BOTTOM })
+    }
+
+    @Test
     fun tinyPiecesAreIgnored() {
         val (labels, lab) = photo(Triple(0 until 1, ClothesLabel.HAT, black))
         assertTrue(extractPieces(lab, labels, base).first.isEmpty())

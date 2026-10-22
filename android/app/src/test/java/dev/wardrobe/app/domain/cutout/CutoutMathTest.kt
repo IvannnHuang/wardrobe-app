@@ -1,6 +1,5 @@
 package dev.wardrobe.app.domain.cutout
 
-import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -46,25 +45,10 @@ class CutoutMathTest {
     }
 
     @Test
-    fun lightingShiftUsesBackgroundMedian() {
-        val n = 2000
-        val labB = FloatArray(n * 3) { if (it % 3 == 0) 80f else 0f }
-        val labG = FloatArray(n * 3) { if (it % 3 == 0) 70f else 0f }
+    fun piecesAlignOnTheirOwnPoints() {
         val warnings = mutableListOf<String>()
-        val shift = matchLighting(labG, labB, BooleanArray(n) { true }, warnings)
-        assertArrayEquals(floatArrayOf(10f, 0f, 0f), shift, 1e-5f)
-        assertEquals(80f, labG[0], 1e-5f)
-        assertTrue(warnings.single().startsWith("brightness changed"))
-    }
-
-    @Test
-    fun changedMaskComparesWithNearestBodyPixel() {
-        // pixel 0: same colour as its nearest body pixel; 1: different colour; 2: too far from the body; 3: no body at all
-        val labB = floatArrayOf(50f, 0f, 0f, 50f, 0f, 0f, 50f, 0f, 0f, 50f, 0f, 0f)
-        val labG = floatArrayOf(52f, 1f, 0f, 20f, 0f, 0f, 50f, 0f, 0f, 50f, 0f, 0f)
-        val nearest = intArrayOf(0, 1, 2, -1)
-        val dist = floatArrayOf(0f, 0f, 40f, 0f)
-        val changed = changedMask(labG, labB, nearest, dist, CutoutSettings())
-        assertEquals(listOf(false, true, true, true), changed.toList())
+        val (m, info) = alignToBody(landmarks(30f), landmarks(0f), 1600, CutoutSettings(), warnings, alignPointsFor(PieceType.SHOES))
+        assertEquals(6, info.first)
+        assertEquals(-30.0, m.tx, 1e-3)
     }
 }

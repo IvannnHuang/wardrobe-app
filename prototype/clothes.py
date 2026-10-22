@@ -34,6 +34,8 @@ PIECES = {
     "scarf": ([17], None),
 }
 BASE_IDS = {"top": [4, 7], "bottom": [5, 6]}
+SKIN_IDS = [11, 14, 15]  # face, arms: colour reference for lighting (experiment_light.py)
+L_WEIGHT = 0.5           # exposure changes mostly move lightness, so it counts half
 
 
 @dataclass
@@ -49,6 +51,7 @@ class BaseOutfit:
     """Colours learned from the body figure photo (same view)."""
     palettes: dict[str, np.ndarray]                       # "top"/"bottom" -> k x 3 LAB
     worn: dict[str, np.ndarray] = field(default_factory=dict)  # accessory -> median LAB
+    skin: np.ndarray | None = None                        # median skin LAB on the body figure
 
 
 @dataclass
@@ -95,7 +98,14 @@ def learn_base(body_rgb: np.ndarray, body_labels: np.ndarray) -> BaseOutfit:
         m = np.isin(body_labels, ids)
         if base_key is None and m.mean() >= 0.002:
             worn[name] = np.median(lab[m], axis=0)
-    return BaseOutfit(palettes, worn)
+    skin = np.isin(body_labels, SKIN_IDS)
+    return BaseOutfit(palettes, worn, np.median(lab[skin], axis=0) if skin.sum() > 500 else None)
+
+
+def weighted_de(lab: np.ndarray, colours: np.ndarray) -> np.ndarray:
+    """Distance to the nearest of `colours` with lightness weighted L_WEIGHT."""
+    w = np.array([L_WEIGHT, 1, 1], np.float32)
+    return np.min(np.linalg.norm((lab[..., None, :] - colours.reshape(-1, 3)[None, None]) * w, axis=3), axis=2)
 
 
 def clean(mask: np.ndarray, min_frac: float) -> np.ndarray:
@@ -111,18 +121,22 @@ def clean(mask: np.ndarray, min_frac: float) -> np.ndarray:
 
 def extract_pieces(rgb: np.ndarray, labels: np.ndarray, base: BaseOutfit, k: Knobs = Knobs()) -> tuple[list[Piece], list[str]]:
     lab = lab_of(rgb)
+    # Lighting: shift colours so my skin matches the body figure's skin.
+    skin = np.isin(labels, SKIN_IDS)
+    if base.skin is not None and skin.sum() > 500:
+        lab = lab + (base.skin - np.median(lab[skin], axis=0))
     pieces, notes = [], []
     for name, (ids, base_key) in PIECES.items():
         region = np.isin(labels, ids)
         if region.mean() < k.min_piece_frac:
             continue
-        if name in base.worn and np.linalg.norm(np.median(lab[region], axis=0) - base.worn[name]) < k.base_delta_e:
+        if name in base.worn and weighted_de(np.median(lab[region], axis=0)[None, None], base.worn[name])[0, 0] < k.base_delta_e:
             notes.append(f"{name}: already worn on body figure")
             continue
         keep, frac = region, 0.0
         palette = base.palettes.get(base_key) if base_key else None
         if palette is not None and len(palette):
-            d = np.min(np.linalg.norm(lab[..., None, :] - palette[None, None], axis=3), axis=2)
+            d = weighted_de(lab, palette)
             is_base = region & (d < k.base_delta_e)
             frac = float(is_base.sum() / max(1, region.sum()))
             if frac >= k.base_piece_frac:

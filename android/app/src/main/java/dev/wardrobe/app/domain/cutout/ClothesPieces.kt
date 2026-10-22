@@ -22,6 +22,8 @@ object ClothesLabel {
     const val LEFT_SHOE = 9
     const val RIGHT_SHOE = 10
     const val FACE = 11
+    const val LEFT_ARM = 14
+    const val RIGHT_ARM = 15
     const val BAG = 16
     const val SCARF = 17
     const val COUNT = 18
@@ -44,9 +46,16 @@ enum class PieceType(val key: String, val base: BaseRegion?, vararg val labels: 
     SCARF("scarf", null, ClothesLabel.SCARF),
 }
 
+/** Face + arms: the colour reference for lighting differences between photos. */
+private val SKIN = intArrayOf(ClothesLabel.FACE, ClothesLabel.LEFT_ARM, ClothesLabel.RIGHT_ARM)
+
 data class PieceSettings(
     /** LAB distance under which a pixel counts as base-outfit colour. */
     val baseDeltaE: Float = 16f,
+    /** Lightness counts this much in colour distances (exposure changes mostly move lightness). */
+    val lightnessWeight: Float = 0.5f,
+    /** Minimum skin pixels needed to use skin as the lighting reference. */
+    val minSkinPixels: Int = 500,
     /** A piece with at least this share of base colour is the base garment itself. */
     val basePieceFrac: Float = 0.6f,
     /** Pieces smaller than this share of the photo are ignored. */
@@ -58,7 +67,17 @@ data class BaseOutfit(
     val palettes: Map<BaseRegion, List<FloatArray>>,
     /** Accessories (shoes, hat, ...) already worn in the body figure, with their median colour. */
     val worn: Map<PieceType, FloatArray>,
+    /** Median skin colour on the body figure (lighting reference), if enough skin is visible. */
+    val skin: FloatArray? = null,
 )
+
+/** Colour distance with lightness down-weighted. */
+fun weightedDeltaE(lab: FloatArray, i: Int, c: FloatArray, lightnessWeight: Float): Float {
+    val dl = (lab[i * 3] - c[0]) * lightnessWeight
+    val da = lab[i * 3 + 1] - c[1]
+    val db = lab[i * 3 + 2] - c[2]
+    return kotlin.math.sqrt(dl * dl + da * da + db * db)
+}
 
 fun IntArray.maskOf(labels: ByteArray): BooleanArray {
     val set = BooleanArray(ClothesLabel.COUNT).also { s -> forEach { s[it] = true } }
@@ -75,7 +94,8 @@ fun learnBase(lab: FloatArray, labels: ByteArray, s: PieceSettings = PieceSettin
         val mask = type.labels.maskOf(labels)
         if (mask.count { it } < s.minPieceFrac * labels.size) null else medianLab(lab, mask)?.let { type to it }
     }.toMap()
-    return BaseOutfit(palettes, worn)
+    val skin = SKIN.maskOf(labels).takeIf { m -> m.count { it } >= s.minSkinPixels }?.let { medianLab(lab, it) }
+    return BaseOutfit(palettes, worn, skin)
 }
 
 /** A garment piece before edge cleanup: pixels to keep, the model's region, and its base-colour share. */
@@ -91,6 +111,14 @@ fun extractPieces(
     val n = labels.size
     val pieces = mutableListOf<RawPiece>()
     val notes = mutableListOf<String>()
+    // Lighting: shift this photo's colours so my skin matches the body figure's skin (experiment_light.py).
+    val skinMask = SKIN.maskOf(labels)
+    val skin = if (base.skin != null && skinMask.count { it } >= s.minSkinPixels) medianLab(lab, skinMask) else null
+    val lab = if (skin == null) lab else {
+        val shift = FloatArray(3) { base.skin!![it] - skin[it] }
+        FloatArray(lab.size) { lab[it] + shift[it % 3] }
+    }
+    val lw = s.lightnessWeight
     for (type in PieceType.entries) {
         val region = type.labels.maskOf(labels)
         val regionCount = region.count { it }
@@ -98,7 +126,7 @@ fun extractPieces(
 
         val worn = base.worn[type]
         val median = medianLab(lab, region)
-        if (worn != null && median != null && deltaE(median, worn) < s.baseDeltaE) {
+        if (worn != null && median != null && weightedDeltaE(median, 0, worn, lw) < s.baseDeltaE) {
             notes += "${type.key}: already worn on body figure"
             continue
         }
@@ -110,7 +138,7 @@ fun extractPieces(
         var baseCount = 0
         val keep = BooleanArray(n) { i ->
             if (!region[i]) return@BooleanArray false
-            val isBase = palette.any { deltaE(lab, i, it) < s.baseDeltaE }
+            val isBase = palette.any { weightedDeltaE(lab, i, it, lw) < s.baseDeltaE }
             if (isBase) baseCount++
             !isBase
         }

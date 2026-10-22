@@ -14,7 +14,7 @@ import java.nio.file.StandardCopyOption
  * Layout:
  *   body/<figureKey>/<view>.jpg                 body figure photos
  *   captures/<sessionId>/<garment>/<view>.jpg   raw captures, garment = 1, 2, … within the session (+ closeup.jpg)
- *   cutouts/<entryId>/<view>.png                batch-processing output awaiting review
+ *   cutouts/<entryId>/<piece>/<view>.png        batch-processing output awaiting review (piece = top, bottom, ...)
  *   items/<itemId>/<versionId>/<view>.png       approved wardrobe images
  */
 class PhotoStore(private val root: File) {
@@ -23,7 +23,7 @@ class PhotoStore(private val root: File) {
     fun rawCapturePath(sessionId: String, garment: Int, view: View) = "captures/$sessionId/$garment/${view.key}.jpg"
     fun closeUpPath(sessionId: String, garment: Int) = "captures/$sessionId/$garment/closeup.jpg"
     fun captureDir(sessionId: String, garment: Int) = "captures/$sessionId/$garment"
-    fun cutoutPath(entryId: Long, view: View) = "cutouts/$entryId/${view.key}.png"
+    fun cutoutPath(entryId: Long, piece: String, view: View) = "cutouts/$entryId/$piece/${view.key}.png"
     fun itemPath(itemId: Long, versionId: Long, view: View) = "items/$itemId/$versionId/${view.key}.png"
     /** Manual shutter shots outside a session (Phase 1 testing). */
 

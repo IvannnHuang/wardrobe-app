@@ -37,7 +37,13 @@ class ProcessCaptureWorker(context: Context, params: WorkerParameters) : Corouti
         dao.update(entry.copy(status = CaptureStatus.PROCESSING))
         return try {
             val output = deps.captureProcessor().process(entry)
-            dao.update(entry.copy(status = CaptureStatus.READY_FOR_REVIEW, cutoutPathsJson = output.cutoutPathsJson))
+            dao.update(
+                entry.copy(
+                    status = CaptureStatus.READY_FOR_REVIEW,
+                    cutoutPathsJson = output.cutoutPathsJson,
+                    suggestedTagsJson = output.suggestedTagsJson,
+                )
+            )
             deps.readyNotifier().notifyIfBatchDone()
             Result.success()
         } catch (e: Exception) {

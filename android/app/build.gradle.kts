@@ -43,7 +43,7 @@ android {
     }
     androidResources {
         // Keep model files uncompressed so MediaPipe can read them straight from the APK.
-        noCompress += listOf("task", "tflite")
+        noCompress += listOf("task", "tflite", "onnx")
     }
 }
 
@@ -83,6 +83,7 @@ dependencies {
 
     implementation(libs.androidx.work.runtime)
     implementation(libs.opencv)
+    implementation(libs.onnxruntime)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
