@@ -198,7 +198,7 @@ LayerRule      category, rank, flags(JSON)
 - Work in **small tasks** scoped to a phase step (e.g. "Phase 1.3: direction check + auto-capture"). Ask before expanding scope.
 - Build and install on the tablet with Gradle (`./gradlew installDebug` from `android/`) when a device is connected via `adb`.
 - Write unit tests for `domain/` (layering rules, tag math, matching). Keep a regression test set of photos in `test-photos/` (local) and re-run the pipeline on it after pipeline changes.
-- Commit after each working step with a clear message. Never commit photos, keystores, or `local.properties`.
+- Don't commit (global rule in `~/.claude/CLAUDE.md`): after each working step, draft a clear commit message + file list for me. Photos, keystores and `local.properties` must never be staged.
 - Do not add dependencies that need network access at runtime. Flag any new permission in the summary.
 - Keep UI simple; performance matters more than animation polish.
 
